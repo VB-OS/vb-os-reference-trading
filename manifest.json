@@ -28,9 +28,9 @@
     }
   ],
   "scenarios": {
-    "governance": 30,
-    "architectural": 17,
-    "total": 47
+    "governance": 24,
+    "architectural": 18,
+    "total": 42
   },
   "asset_classes": [
     "equity",
