@@ -32,7 +32,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-BASE = os.environ.get("VBOS_API_URL", "https://api.vbos.cloud")
+BASE = os.environ.get("VBOS_URL", "https://api.vb-os.org")
 API_KEY = os.environ["VBOS_API_KEY"]
 PROJECT_ID = os.environ["VBOS_PROJECT_ID"]
 ENV_ID = os.environ["VBOS_ENVIRONMENT_ID"]

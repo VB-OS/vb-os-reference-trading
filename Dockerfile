@@ -1,20 +1,21 @@
-FROM --platform=linux/amd64 python:3.12-slim
+# Copyright 2026 MNC Labs, Inc. Licensed under Apache 2.0.
+
+FROM python:3.12-slim
 
 WORKDIR /app
 
+# Install pinned dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY vendor/vb_os-0.1.0.tar.gz /tmp/vb_os-0.1.0.tar.gz
+# Install VB-OS Python SDK (not yet on PyPI -- vendored as sdist)
+COPY vendor/vb_os-0.1.0.tar.gz /tmp/
 RUN pip install --no-cache-dir /tmp/vb_os-0.1.0.tar.gz && rm /tmp/vb_os-0.1.0.tar.gz
 
+# Copy application
+COPY bootstrap.py demo.py verify.py execution_gateway.py ./
+COPY seed.sql seed_template.py ./
 COPY boundaries/ boundaries/
-COPY seed.sql .
-COPY seed_template.py .
-COPY bootstrap.py .
-COPY demo.py .
-COPY verify.py .
-COPY execution_gateway.py .
 
 ENTRYPOINT ["python3"]
 CMD ["demo.py", "--list"]

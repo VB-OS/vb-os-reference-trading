@@ -37,33 +37,40 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from pathlib import Path
 
-VBOS_API_URL = os.environ.get("VBOS_API_URL", "https://api.vbos.cloud")
-VBOS_API_KEY = os.environ["VBOS_API_KEY"]
-VBOS_PROJECT_ID = os.environ["VBOS_PROJECT_ID"]
+VBOS_URL = os.environ.get("VBOS_URL", "https://api.vb-os.org")
+API_KEY = os.environ.get("VBOS_API_KEY", "")
+PROJECT_ID = os.environ.get("VBOS_PROJECT_ID", "")
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://trading-gateway:9093")
-
-ROOT = Path(__file__).parent
-STATE_FILE = ROOT / ".bootstrap-state.json"
 
 RULE = "-" * 72
 
+_connector_cache: dict[str, str] = {}
 
-def _load_state() -> dict:
-    if not STATE_FILE.exists():
-        print("ERROR: .bootstrap-state.json not found. Run bootstrap.py first.")
+
+def _resolve_connector(name: str) -> str:
+    if name in _connector_cache:
+        return _connector_cache[name]
+
+    if not _connector_cache:
+        result = api("GET", f"/v1/projects/{PROJECT_ID}/connectors")
+        if result:
+            for item in result.get("data", result.get("items", [])):
+                _connector_cache[item["name"]] = item["id"]
+
+    if name not in _connector_cache:
+        print(f"  Connector '{name}' not found in project")
         sys.exit(1)
-    return json.loads(STATE_FILE.read_text())
+    return _connector_cache[name]
 
 
 def api(method: str, path: str, body: dict | None = None) -> dict | None:
-    url = f"{VBOS_API_URL}{path}"
+    url = f"{VBOS_URL}{path}"
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
         url, data=data, method=method,
         headers={
-            "Authorization": f"Bearer {VBOS_API_KEY}",
+            "Authorization": f"Bearer {API_KEY}",
             "Content-Type": "application/json",
         },
     )
@@ -103,7 +110,7 @@ def gateway_api(method: str, path: str, body: dict | None = None) -> dict | None
 
 
 def list_evaluations() -> list[dict]:
-    path = f"/v1/projects/{VBOS_PROJECT_ID}/evaluations"
+    path = f"/v1/projects/{PROJECT_ID}/evaluations"
     result = api("GET", path)
     if not result:
         return []
@@ -136,7 +143,7 @@ def verify_parity() -> tuple[int, int]:
         if not eval_id:
             continue
 
-        result = api("POST", f"/v1/projects/{VBOS_PROJECT_ID}/evaluations/{eval_id}/replay", {})
+        result = api("POST", f"/v1/projects/{PROJECT_ID}/evaluations/{eval_id}/replay", {})
         if not result:
             print(f"    SKIP  {eval_id[:12]}  (replay failed)")
             failed += 1
@@ -184,7 +191,7 @@ def verify_integrity() -> tuple[int, int]:
         if boundary != "B_EXECUTION_AUTHORIZATION":
             continue
 
-        detail = api("GET", f"/v1/projects/{VBOS_PROJECT_ID}/evaluations/{eval_id}")
+        detail = api("GET", f"/v1/projects/{PROJECT_ID}/evaluations/{eval_id}")
         if not detail:
             continue
 
@@ -255,12 +262,7 @@ def verify_counterfactual() -> tuple[int, int]:
     print("  Verification 3: Counterfactual Replay")
     print(RULE)
 
-    state = _load_state()
-    connector_ids = state.get("connector_ids", {})
-    b1_connector = connector_ids.get("trading-b1-evidence")
-    if not b1_connector:
-        print("  No B1 connector in bootstrap state. Run bootstrap.py first.")
-        return 0, 0
+    b1_connector = _resolve_connector("trading-b1-evidence")
 
     # Submit a clean B1 evaluation, then re-submit with account_status changed
     print("  Submitting clean B1 evidence...")
@@ -280,7 +282,7 @@ def verify_counterfactual() -> tuple[int, int]:
     clean_prov = {k: "oms_database" for k in clean_evidence}
     clean_resp = api(
         "POST",
-        f"/v1/projects/{VBOS_PROJECT_ID}/connectors/{b1_connector}/gather",
+        f"/v1/projects/{PROJECT_ID}/connectors/{b1_connector}/gather",
         {"raw_payload": clean_evidence, "provenance": clean_prov},
     )
 
@@ -305,7 +307,7 @@ def verify_counterfactual() -> tuple[int, int]:
     cf_prov = {k: "oms_database" for k in cf_evidence}
     cf_resp = api(
         "POST",
-        f"/v1/projects/{VBOS_PROJECT_ID}/connectors/{b1_connector}/gather",
+        f"/v1/projects/{PROJECT_ID}/connectors/{b1_connector}/gather",
         {"raw_payload": cf_evidence, "provenance": cf_prov},
     )
 
@@ -330,14 +332,9 @@ def verify_expiration() -> tuple[int, int]:
     print("  Verification 4: Gateway Expiration")
     print(RULE)
 
-    state = _load_state()
-    connector_ids = state.get("connector_ids", {})
-    b1_conn = connector_ids.get("trading-b1-evidence")
-    b2_conn = connector_ids.get("trading-b2-evidence")
-    b3_conn = connector_ids.get("trading-b3-evidence")
-    if not all([b1_conn, b2_conn, b3_conn]):
-        print("  Missing connectors in bootstrap state.")
-        return 0, 0
+    b1_conn = _resolve_connector("trading-b1-evidence")
+    b2_conn = _resolve_connector("trading-b2-evidence")
+    b3_conn = _resolve_connector("trading-b3-evidence")
 
     passed = 0
     failed = 0
@@ -359,7 +356,7 @@ def verify_expiration() -> tuple[int, int]:
         "market_session_open": 1,
     }
     b1_prov = {k: "oms_database" for k in b1_ev}
-    b1_resp = api("POST", f"/v1/projects/{VBOS_PROJECT_ID}/connectors/{b1_conn}/gather",
+    b1_resp = api("POST", f"/v1/projects/{PROJECT_ID}/connectors/{b1_conn}/gather",
                   {"raw_payload": b1_ev, "provenance": b1_prov})
     if not b1_resp:
         print("  B1 gather failed")
@@ -396,7 +393,7 @@ def verify_expiration() -> tuple[int, int]:
     b2_prov["position_limit_quantity"] = "risk_system"
     b2_prov["last_opposite_side_seconds"] = "compliance_system"
     b2_prov["cooldown_window_seconds"] = "compliance_system"
-    b2_resp = api("POST", f"/v1/projects/{VBOS_PROJECT_ID}/connectors/{b2_conn}/gather",
+    b2_resp = api("POST", f"/v1/projects/{PROJECT_ID}/connectors/{b2_conn}/gather",
                   {"raw_payload": b2_ev, "provenance": b2_prov})
     if not b2_resp:
         print("  B2 gather failed")
@@ -456,7 +453,7 @@ def verify_expiration() -> tuple[int, int]:
         "b1_evaluation_id": "orchestrator",
         "b2_evaluation_id": "orchestrator",
     }
-    b3_resp = api("POST", f"/v1/projects/{VBOS_PROJECT_ID}/connectors/{b3_conn}/gather",
+    b3_resp = api("POST", f"/v1/projects/{PROJECT_ID}/connectors/{b3_conn}/gather",
                   {"raw_payload": b3_ev, "provenance": b3_prov})
     if not b3_resp:
         print("  B3 gather failed")

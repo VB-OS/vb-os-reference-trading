@@ -15,15 +15,17 @@
 
 """VB-OS Trading Reference Integration -- governed order pipeline demo.
 
-Runs 30 governance scenarios (A1-E5) plus 17 architectural demos (F1-F17)
-through the four-boundary pipeline: B1 Order Admissibility, B2 Compliance,
-B3 Execution Authorization, B4 Execution Reconciliation.
+Demonstrates end-to-end governed trading workflow against a local PostgreSQL
+OMS database and VB-OS Cloud. The reference integration reads order proposals
+from the local database, builds evidence, and submits payloads to VB-OS Cloud,
+which performs evidence mapping, boundary evaluation, audit, and flow execution.
 
     python3 demo.py --list                  # list all scenarios
-    python3 demo.py --run A1               # run one scenario
-    python3 demo.py --run A                # run a group
-    python3 demo.py --all                  # run all A-E scenarios
-    python3 demo.py --all --include-f      # run all including F-series
+    python3 demo.py --scenario A1           # run one scenario
+    python3 demo.py --run A                 # run a group
+    python3 demo.py --all                   # run all A-E scenarios
+    python3 demo.py --all --include-f       # run all including F-series
+    python3 demo.py --pipeline              # full B1->B2->B3->gateway->B4 pipeline
     python3 demo.py --live E1              # run with live Alpaca submission
     python3 demo.py --benchmark            # timing benchmark (all A-E)
 """
@@ -37,88 +39,45 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from pathlib import Path
 
 import psycopg2
+from vbos import VBOSClient
 
-VBOS_API_URL = os.environ.get("VBOS_API_URL", "https://api.vbos.cloud")
-VBOS_API_KEY = os.environ["VBOS_API_KEY"]
-VBOS_PROJECT_ID = os.environ["VBOS_PROJECT_ID"]
+VBOS_URL = os.environ.get("VBOS_URL", "https://api.vb-os.org")
+API_KEY = os.environ.get("VBOS_API_KEY", "")
+PROJECT_ID = os.environ.get("VBOS_PROJECT_ID", "")
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://trading:trading@trading-postgres:5432/trading")
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://trading-gateway:9093")
 
-ROOT = Path(__file__).parent
-STATE_FILE = ROOT / ".bootstrap-state.json"
-
 RULE = "-" * 72
 
+_connector_cache: dict[str, str] = {}
 
-def _load_state() -> dict:
-    if not STATE_FILE.exists():
-        print("ERROR: .bootstrap-state.json not found. Run bootstrap.py first.")
+
+def _resolve_connector(client: VBOSClient, name: str) -> str:
+    if name in _connector_cache:
+        return _connector_cache[name]
+
+    if not _connector_cache:
+        url = f"/v1/projects/{PROJECT_ID}/connectors"
+        req = client._client.build_request("GET", url)
+        resp = client._client.send(req)
+        resp.raise_for_status()
+        data = resp.json()
+        for item in data.get("data", data.get("items", data if isinstance(data, list) else [])):
+            _connector_cache[item["name"]] = item["id"]
+
+    if name not in _connector_cache:
+        print(f"  Connector '{name}' not found in project")
         sys.exit(1)
-    return json.loads(STATE_FILE.read_text())
+    return _connector_cache[name]
 
 
-STATE: dict = {}
-CONNECTOR_IDS: dict = {}
-BOUNDARY_IDS: dict = {}
+def _sdk_client() -> VBOSClient:
+    return VBOSClient(api_key=API_KEY, base_url=VBOS_URL)
 
 
-def _init_state() -> None:
-    global STATE, CONNECTOR_IDS, BOUNDARY_IDS
-    STATE = _load_state()
-    CONNECTOR_IDS = STATE.get("connector_ids", {})
-    BOUNDARY_IDS = STATE.get("boundaries", {})
-
-
-# -- VB-OS Cloud API -------------------------------------------------------
-
-def api(method: str, path: str, body: dict | None = None) -> dict | None:
-    url = f"{VBOS_API_URL}{path}"
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(
-        url, data=data, method=method,
-        headers={
-            "Authorization": f"Bearer {VBOS_API_KEY}",
-            "Content-Type": "application/json",
-        },
-    )
-    for attempt in range(4):
-        try:
-            with urllib.request.urlopen(req, timeout=120) as r:
-                raw = r.read()
-                return json.loads(raw) if raw else {}
-        except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < 3:
-                time.sleep(2 ** attempt)
-                continue
-            body_text = e.read().decode()[:300] if e.fp else ""
-            print(f"  HTTP {e.code}: {body_text}")
-            return None
-    return None
-
-
-def gather(connector_name: str, payload: dict, provenance: dict | None = None) -> dict | None:
-    connector_id = CONNECTOR_IDS.get(connector_name)
-    if not connector_id:
-        print(f"  ERROR: connector '{connector_name}' not in bootstrap state")
-        return None
-    body: dict = {"raw_payload": payload}
-    if provenance:
-        body["provenance"] = provenance
-    return api("POST", f"/v1/projects/{VBOS_PROJECT_ID}/connectors/{connector_id}/gather", body)
-
-
-def read_evaluation(evaluation_id: str) -> dict | None:
-    return api("GET", f"/v1/projects/{VBOS_PROJECT_ID}/evaluations/{evaluation_id}")
-
-
-def replay_evaluation(evaluation_id: str) -> dict | None:
-    return api("POST", f"/v1/projects/{VBOS_PROJECT_ID}/evaluations/{evaluation_id}/replay", {})
-
-
-# -- Gateway API ------------------------------------------------------------
+# -- Gateway API (local execution gateway, not VB-OS Cloud) -----------------
 
 def gateway_api(method: str, path: str, body: dict | None = None) -> dict | None:
     url = f"{GATEWAY_URL}{path}"
@@ -155,17 +114,37 @@ def show_evaluation(evaluation: dict, label: str) -> None:
         print(f"      Failure: {reason.get('type')}{': ' + detail if detail else ''}")
 
 
-def show_replay(evaluation_id: str) -> None:
-    result = replay_evaluation(evaluation_id)
-    if not result:
+def show_provenance(client: VBOSClient, evaluation_id: str) -> None:
+    if not evaluation_id:
         return
-    out = result.get("replay_evaluation_output") or {}
-    print(f"      Replay: {out.get('decision')} "
-          f"(result_match={result.get('result_match')}, "
-          f"identity_match={result.get('replay_id_match')})")
+    try:
+        url = f"/v1/projects/{PROJECT_ID}/evaluations/{evaluation_id}"
+        req = client._client.build_request("GET", url)
+        resp = client._client.send(req)
+        data = resp.json()
+        record = data.get("record", data)
+        provenance = record.get("acquisition_provenance") or {}
+        acq_class = provenance.get("acquisition_class", "unknown")
+        print(f"      Acquisition: {acq_class}")
+    except Exception:
+        pass
 
 
-# -- Database access --------------------------------------------------------
+def show_replay(client: VBOSClient, evaluation_id: str) -> None:
+    try:
+        result = client.evaluations.replay(PROJECT_ID, evaluation_id)
+        raw = result.model_dump() if hasattr(result, "model_dump") else result
+        replay_out = raw.get("replay_evaluation_output") or {}
+        print(
+            f"      Replay: {replay_out.get('decision')} "
+            f"(result_match={raw.get('result_match')}, "
+            f"identity_match={raw.get('replay_id_match')})"
+        )
+    except Exception as exc:
+        print(f"      Replay: {exc}")
+
+
+# -- Database access (local OMS source system) ------------------------------
 
 def load_proposal(order_ref: str) -> dict | None:
     conn = psycopg2.connect(DATABASE_URL)
@@ -224,7 +203,7 @@ def derive_notional(side: str, order_type: str, quantity: int,
         return quantity * price_cents // quantity_divisor
 
 
-def build_b1_evidence(p: dict) -> tuple[dict, dict]:
+def build_b1_evidence(p: dict) -> dict:
     price = p["limit_price_cents"] if p["order_type"] == "limit" else p["reference_price_cents"]
     notional = derive_notional(p["side"], p["order_type"], p["quantity"], price, p["quantity_divisor"])
 
@@ -244,11 +223,10 @@ def build_b1_evidence(p: dict) -> tuple[dict, dict]:
     if p["side"] == "sell":
         evidence["position_quantity"] = p["position_quantity"]
 
-    provenance = {k: "oms_database" for k in evidence}
-    return evidence, provenance
+    return evidence
 
 
-def build_b2_evidence(p: dict) -> tuple[dict, dict]:
+def build_b2_evidence(p: dict) -> dict:
     price = p["limit_price_cents"] if p["order_type"] == "limit" else p["reference_price_cents"]
     notional = derive_notional(p["side"], p["order_type"], p["quantity"], price, p["quantity_divisor"])
 
@@ -272,20 +250,10 @@ def build_b2_evidence(p: dict) -> tuple[dict, dict]:
     if p["restricted_list_hit"]:
         evidence["restricted_list_hit"] = p["restricted_list_hit"]
 
-    provenance = {k: "oms_database" for k in evidence}
-    provenance["mandate_match"] = "compliance_system"
-    provenance["concentration_bps_after"] = "risk_system"
-    provenance["concentration_limit_bps"] = "risk_system"
-    provenance["projected_position_quantity"] = "risk_system"
-    provenance["position_limit_quantity"] = "risk_system"
-    provenance["last_opposite_side_seconds"] = "compliance_system"
-    provenance["cooldown_window_seconds"] = "compliance_system"
-    if "restricted_list_hit" in evidence:
-        provenance["restricted_list_hit"] = "compliance_system"
-    return evidence, provenance
+    return evidence
 
 
-def build_b3_evidence(p: dict, b1_eval_id: str, b2_eval_id: str) -> tuple[dict, dict]:
+def build_b3_evidence(p: dict, b1_eval_id: str, b2_eval_id: str) -> dict:
     price = p["limit_price_cents"] if p["order_type"] == "limit" else p["reference_price_cents"]
     notional = derive_notional(p["side"], p["order_type"], p["quantity"], price, p["quantity_divisor"])
     combined = p["desk_exposure_cents"] + notional
@@ -301,7 +269,7 @@ def build_b3_evidence(p: dict, b1_eval_id: str, b2_eval_id: str) -> tuple[dict, 
         deviation_below = 0
         tolerance_threshold = 0
 
-    evidence = {
+    return {
         "account_id": p["account_id"],
         "instrument_id": p["instrument_id"],
         "asset_class": p["asset_class"],
@@ -328,39 +296,26 @@ def build_b3_evidence(p: dict, b1_eval_id: str, b2_eval_id: str) -> tuple[dict, 
         "b2_evaluation_id": b2_eval_id,
     }
 
-    provenance = {
-        "account_id": "oms_database",
-        "instrument_id": "oms_database",
-        "asset_class": "oms_database",
-        "side": "oms_database",
-        "quantity": "oms_database",
-        "quantity_unit": "oms_database",
-        "order_type": "oms_database",
-        "order_ref": "oms_database",
-        "order_notional_cents": "oms_database",
-        "trader_authority_cents": "risk_system",
-        "desk_exposure_cents": "risk_system",
-        "desk_limit_cents": "risk_system",
-        "combined_desk_and_order_cents": "oms_database",
-        "limit_price_cents": "oms_database",
-        "reference_price_cents": "market_data",
-        "price_tolerance_bps": "risk_system",
-        "price_deviation_above_scaled": "oms_database",
-        "price_deviation_below_scaled": "oms_database",
-        "tolerance_threshold_scaled": "oms_database",
-        "margin_requirement_cents": "risk_system",
-        "available_margin_cents": "risk_system",
-        "authorization_valid_seconds": "risk_system",
-        "b1_evaluation_id": "orchestrator",
-        "b2_evaluation_id": "orchestrator",
-    }
 
-    return evidence, provenance
+# -- SDK gather wrapper -----------------------------------------------------
+
+def gather(client: VBOSClient, connector_name: str, payload: dict) -> dict | None:
+    connector_id = _resolve_connector(client, connector_name)
+    try:
+        response = client.connectors.gather(
+            project_id=PROJECT_ID,
+            connector_id=connector_id,
+            payload=payload,
+        )
+        return response
+    except Exception as exc:
+        print(f"  VB-OS Cloud error: {exc}")
+        return None
 
 
 # -- Pipeline orchestration -------------------------------------------------
 
-def run_pipeline(p: dict, live: bool = False) -> dict:
+def run_pipeline(client: VBOSClient, p: dict, live: bool = False) -> dict:
     """Run B1 -> B2 -> B3 sequential pipeline. Returns result dict."""
     result = {
         "order_ref": p["order_ref"],
@@ -372,8 +327,8 @@ def run_pipeline(p: dict, live: bool = False) -> dict:
 
     # -- B1: Order Admissibility --
     print("  Stage B1 -- Order Admissibility")
-    b1_ev, b1_prov = build_b1_evidence(p)
-    b1_resp = gather("trading-b1-evidence", b1_ev, b1_prov)
+    b1_ev = build_b1_evidence(p)
+    b1_resp = gather(client, "trading-b1-evidence", b1_ev)
     if not b1_resp:
         result["stopped_at"] = "B1"
         return result
@@ -387,16 +342,18 @@ def run_pipeline(p: dict, live: bool = False) -> dict:
     if b1_decision != "ASSERT":
         result["stopped_at"] = "B1"
         if b1_eval_id:
-            show_replay(b1_eval_id)
+            show_provenance(client, b1_eval_id)
+            show_replay(client, b1_eval_id)
         return result
 
     if b1_eval_id:
-        show_replay(b1_eval_id)
+        show_provenance(client, b1_eval_id)
+        show_replay(client, b1_eval_id)
 
     # -- B2: Compliance Authorization --
     print("\n  Stage B2 -- Compliance Authorization")
-    b2_ev, b2_prov = build_b2_evidence(p)
-    b2_resp = gather("trading-b2-evidence", b2_ev, b2_prov)
+    b2_ev = build_b2_evidence(p)
+    b2_resp = gather(client, "trading-b2-evidence", b2_ev)
     if not b2_resp:
         result["stopped_at"] = "B2"
         return result
@@ -410,16 +367,18 @@ def run_pipeline(p: dict, live: bool = False) -> dict:
     if b2_decision != "ASSERT":
         result["stopped_at"] = "B2"
         if b2_eval_id:
-            show_replay(b2_eval_id)
+            show_provenance(client, b2_eval_id)
+            show_replay(client, b2_eval_id)
         return result
 
     if b2_eval_id:
-        show_replay(b2_eval_id)
+        show_provenance(client, b2_eval_id)
+        show_replay(client, b2_eval_id)
 
     # -- B3: Execution Authorization --
     print("\n  Stage B3 -- Execution Authorization")
-    b3_ev, b3_prov = build_b3_evidence(p, b1_eval_id, b2_eval_id)
-    b3_resp = gather("trading-b3-evidence", b3_ev, b3_prov)
+    b3_ev = build_b3_evidence(p, b1_eval_id, b2_eval_id)
+    b3_resp = gather(client, "trading-b3-evidence", b3_ev)
     if not b3_resp:
         result["stopped_at"] = "B3"
         return result
@@ -433,11 +392,13 @@ def run_pipeline(p: dict, live: bool = False) -> dict:
     if b3_decision != "ASSERT":
         result["stopped_at"] = "B3"
         if b3_eval_id:
-            show_replay(b3_eval_id)
+            show_provenance(client, b3_eval_id)
+            show_replay(client, b3_eval_id)
         return result
 
     if b3_eval_id:
-        show_replay(b3_eval_id)
+        show_provenance(client, b3_eval_id)
+        show_replay(client, b3_eval_id)
 
     # -- Gateway verification --
     print("\n  Gateway -- Authorization Verification")
@@ -542,7 +503,7 @@ def list_scenarios(include_f: bool = False) -> None:
     print(RULE)
 
 
-def run_scenario(key: str, live: bool = False) -> dict | None:
+def run_scenario(key: str, client: VBOSClient, live: bool = False) -> dict | None:
     all_scenarios = {**SCENARIOS, **F_SCENARIOS}
     if key not in all_scenarios:
         print(f"Unknown scenario: {key}")
@@ -565,25 +526,25 @@ def run_scenario(key: str, live: bool = False) -> dict | None:
 
     # F-series scenarios with special handling
     if key.startswith("F"):
-        return run_f_scenario(key, p, live)
+        return run_f_scenario(key, p, client, live)
 
-    result = run_pipeline(p, live=live)
+    result = run_pipeline(client, p, live=live)
     print()
 
     # E3-E5: simulated B4 reconciliation evidence
     if key in ("E3", "E4", "E5") and result.get("b3") and result["b3"].get("decision") == "ASSERT":
-        run_simulated_b4(key, p, result)
+        run_simulated_b4(key, p, result, client)
 
     return result
 
 
-def run_f_scenario(key: str, p: dict, live: bool = False) -> dict:
+def run_f_scenario(key: str, p: dict, client: VBOSClient, live: bool = False) -> dict:
     """Handle F-series architectural demonstration scenarios."""
 
     if key == "F1":
         # Expired authorization: run pipeline, then wait for expiration, then submit to gateway
         print("  Running pipeline to obtain B3 authorization...")
-        result = run_pipeline(p, live=False)
+        result = run_pipeline(client, p, live=False)
         if not result.get("b3") or result["b3"].get("decision") != "ASSERT":
             print("  Pipeline did not produce B3 ASSERT; cannot demonstrate expiration")
             return result
@@ -600,7 +561,7 @@ def run_f_scenario(key: str, p: dict, live: bool = False) -> dict:
 
     if key == "F2":
         # Duplicate execution event: submit same B4 evidence twice
-        result = run_pipeline(p, live=False)
+        result = run_pipeline(client, p, live=False)
         if not result.get("gateway"):
             return result
         dispatch_id = f"DISPATCH-{p['order_ref']}-{int(time.time())}"
@@ -619,7 +580,7 @@ def run_f_scenario(key: str, p: dict, live: bool = False) -> dict:
 
     if key == "F4":
         # Parameter mutation: alter quantity in proposed order vs sealed B3
-        result = run_pipeline(p, live=False)
+        result = run_pipeline(client, p, live=False)
         if not result.get("b3") or result["b3"].get("decision") != "ASSERT":
             return result
         print("\n  Submitting mutated order to gateway (quantity altered)...")
@@ -640,14 +601,14 @@ def run_f_scenario(key: str, p: dict, live: bool = False) -> dict:
         return result
 
     if key in ("F5", "F5b"):
-        result = run_pipeline(p, live=False)
+        result = run_pipeline(client, p, live=False)
         return result
 
     if key == "F8":
         # Forged B2 lineage: run B1 + B2 with different accounts, then splice into B3
         print("  Running B1 for real order (ACC-ALPHA-1)...")
-        b1_ev, b1_prov = build_b1_evidence(p)
-        b1_resp = gather("trading-b1-evidence", b1_ev, b1_prov)
+        b1_ev = build_b1_evidence(p)
+        b1_resp = gather(client, "trading-b1-evidence", b1_ev)
         b1_eval = (b1_resp or {}).get("evaluation", {})
         show_evaluation(b1_eval, "B1")
         b1_eval_id = b1_eval.get("evaluation_id", "")
@@ -657,21 +618,20 @@ def run_f_scenario(key: str, p: dict, live: bool = False) -> dict:
         if not p_fake:
             print("  ERROR: ORD-F8-B2 not found")
             return {"stopped_at": "F8-setup"}
-        b2_ev, b2_prov = build_b2_evidence(p_fake)
-        b2_resp = gather("trading-b2-evidence", b2_ev, b2_prov)
+        b2_ev = build_b2_evidence(p_fake)
+        b2_resp = gather(client, "trading-b2-evidence", b2_ev)
         b2_eval = (b2_resp or {}).get("evaluation", {})
         show_evaluation(b2_eval, "B2-forged")
         b2_eval_id = b2_eval.get("evaluation_id", "")
 
         print("\n  Running B3 with forged B2 evaluation_id (cross-chain mismatch expected)...")
-        b3_ev, b3_prov = build_b3_evidence(p, b1_eval_id, b2_eval_id)
-        b3_resp = gather("trading-b3-evidence", b3_ev, b3_prov)
+        b3_ev = build_b3_evidence(p, b1_eval_id, b2_eval_id)
+        b3_resp = gather(client, "trading-b3-evidence", b3_ev)
         b3_eval = (b3_resp or {}).get("evaluation", {})
         show_evaluation(b3_eval, "B3")
 
         if b3_eval.get("decision") == "ASSERT":
             print("\n  B3 ASSERTed but gateway will catch cross-chain mismatch...")
-            dispatch_id = f"DISPATCH-F8-{int(time.time())}"
             gw_resp = gateway_api("POST", "/verify", {
                 "evaluation_id": b3_eval.get("evaluation_id"),
                 "proposed_order": {
@@ -689,10 +649,7 @@ def run_f_scenario(key: str, p: dict, live: bool = False) -> dict:
         return {"b1": b1_eval, "b2_forged": b2_eval, "b3": b3_eval}
 
     if key == "F9":
-        # Notional inconsistency: run pipeline with deliberately wrong notional
-        # The seed data has quantity=1000, price=$200, but the derivation will produce
-        # the correct notional; we override it to demonstrate gateway arithmetic check
-        result = run_pipeline(p, live=False)
+        result = run_pipeline(client, p, live=False)
         if not result.get("b3") or result["b3"].get("decision") != "ASSERT":
             return result
         print("\n  Gateway arithmetic verification would catch notional inconsistency")
@@ -701,8 +658,7 @@ def run_f_scenario(key: str, p: dict, live: bool = False) -> dict:
         return result
 
     if key == "F10":
-        # UNCERTAIN recovery: submit, simulate timeout, then recover
-        result = run_pipeline(p, live=False)
+        result = run_pipeline(client, p, live=False)
         print("\n  F10 demonstrates UNCERTAIN recovery when broker response is ambiguous.")
         print("  In --live mode, a network timeout would set UNCERTAIN status,")
         print("  and the reconciliation loop resolves it to FILLED/CANCELED/EXPIRED.")
@@ -710,7 +666,7 @@ def run_f_scenario(key: str, p: dict, live: bool = False) -> dict:
 
     if key == "F16":
         # Concurrent dispatch same B3: two dispatches referencing same authorization
-        result = run_pipeline(p, live=False)
+        result = run_pipeline(client, p, live=False)
         if not result.get("b3") or result["b3"].get("decision") != "ASSERT":
             return result
         b3_eval_id = result["b3"]["evaluation_id"]
@@ -734,14 +690,14 @@ def run_f_scenario(key: str, p: dict, live: bool = False) -> dict:
     if key == "F17":
         # Cross-chain order type mismatch: B1 with market, B3 with limit
         print("  Running B1 with market order type...")
-        b1_ev, b1_prov = build_b1_evidence(p)
-        b1_resp = gather("trading-b1-evidence", b1_ev, b1_prov)
+        b1_ev = build_b1_evidence(p)
+        b1_resp = gather(client, "trading-b1-evidence", b1_ev)
         b1_eval = (b1_resp or {}).get("evaluation", {})
         show_evaluation(b1_eval, "B1-market")
 
         print("\n  Running B2 with market order type...")
-        b2_ev, b2_prov = build_b2_evidence(p)
-        b2_resp = gather("trading-b2-evidence", b2_ev, b2_prov)
+        b2_ev = build_b2_evidence(p)
+        b2_resp = gather(client, "trading-b2-evidence", b2_ev)
         b2_eval = (b2_resp or {}).get("evaluation", {})
         show_evaluation(b2_eval, "B2-market")
 
@@ -754,8 +710,8 @@ def run_f_scenario(key: str, p: dict, live: bool = False) -> dict:
         b2_eval_id = b2_eval.get("evaluation_id", "")
 
         print("\n  Running B3 with LIMIT order type (mismatch with B1/B2 market)...")
-        b3_ev, b3_prov = build_b3_evidence(p_limit, b1_eval_id, b2_eval_id)
-        b3_resp = gather("trading-b3-evidence", b3_ev, b3_prov)
+        b3_ev = build_b3_evidence(p_limit, b1_eval_id, b2_eval_id)
+        b3_resp = gather(client, "trading-b3-evidence", b3_ev)
         b3_eval = (b3_resp or {}).get("evaluation", {})
         show_evaluation(b3_eval, "B3-limit")
 
@@ -769,14 +725,13 @@ def run_f_scenario(key: str, p: dict, live: bool = False) -> dict:
         return {"b1": b1_eval, "b2": b2_eval, "b3": b3_eval}
 
     # Default for other F scenarios: run standard pipeline
-    result = run_pipeline(p, live=False)
+    result = run_pipeline(client, p, live=False)
     return result
 
 
-def run_simulated_b4(key: str, p: dict, result: dict) -> None:
+def run_simulated_b4(key: str, p: dict, result: dict, client: VBOSClient) -> None:
     """Run simulated B4 reconciliation for E3-E5 scenarios."""
     b3_eval_id = result["b3"]["evaluation_id"]
-    b4_connector = "trading-b4-evidence"
 
     if key == "E3":
         # Over-execution: executed_quantity > authorized_quantity
@@ -820,25 +775,177 @@ def run_simulated_b4(key: str, p: dict, result: dict) -> None:
     else:
         return
 
-    b4_provenance = {
-        "venue_authorization_reference": "venue_alpaca",
-        "expected_authorization_reference": "sealed_evaluation",
-        "execution_status": "venue_alpaca",
-        "executed_quantity": "venue_alpaca",
-        "authorized_quantity": "sealed_evaluation",
-        "previous_executed_quantity": "gateway_state",
-        "executed_avg_price_cents": "venue_alpaca",
-        "authorized_price_ceiling_cents": "sealed_evaluation",
-    }
-
-    b4_resp = gather(b4_connector, b4_evidence, b4_provenance)
+    b4_resp = gather(client, "trading-b4-evidence", b4_evidence)
     if b4_resp:
         b4_eval = b4_resp.get("evaluation") or {}
         show_evaluation(b4_eval, "B4")
         b4_eval_id = b4_eval.get("evaluation_id", "")
         if b4_eval_id:
-            show_replay(b4_eval_id)
+            show_provenance(client, b4_eval_id)
+            show_replay(client, b4_eval_id)
     print()
+
+
+# -- Full pipeline mode -----------------------------------------------------
+
+def run_full_pipeline(live: bool = False) -> int:
+    """Full B1 -> B2 -> B3 -> Gateway -> B4 pipeline on E1 (happy path)."""
+    print("=" * 72)
+    print("  VB-OS Trading Reference Integration")
+    print("  Mode: FULL PIPELINE (E1 -- clean equity buy)")
+    print("=" * 72)
+
+    client = _sdk_client()
+
+    print(f"\n  Checking local source systems...")
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        conn.close()
+        print(f"  PostgreSQL .............. connected")
+    except Exception:
+        print(f"  PostgreSQL .............. UNREACHABLE")
+        print("  Cannot proceed -- local database unavailable")
+        return 1
+
+    p = load_proposal("ORD-E1")
+    if not p:
+        print("  ERROR: ORD-E1 not found in database")
+        return 1
+
+    results: list[tuple[str, str, str]] = []
+
+    # -- B1: Order Admissibility --
+    print(f"\n{'=' * 72}")
+    print("  STAGE 1: B1 Order Admissibility")
+    print(f"  Acquisition: caller_supplied_payload")
+    print(f"{'=' * 72}\n")
+
+    b1_ev = build_b1_evidence(p)
+    b1_resp = gather(client, "trading-b1-evidence", b1_ev)
+    if not b1_resp:
+        print("\n  B1 submission failed -- pipeline halted.")
+        return 1
+    b1_eval = b1_resp.get("evaluation") or {}
+    show_evaluation(b1_eval, "B1")
+    show_provenance(client, b1_eval.get("evaluation_id"))
+
+    if b1_eval.get("decision") != "ASSERT":
+        print("\n  B1 DEFER -- pipeline halted. Order inadmissible.")
+        return 1
+    b1_eval_id = b1_eval.get("evaluation_id", "")
+    results.append(("B1", b1_eval_id, b1_eval.get("decision")))
+
+    # -- B2: Compliance Authorization --
+    print(f"\n{'=' * 72}")
+    print("  STAGE 2: B2 Compliance Authorization")
+    print(f"  Acquisition: caller_supplied_payload")
+    print(f"{'=' * 72}\n")
+
+    b2_ev = build_b2_evidence(p)
+    b2_resp = gather(client, "trading-b2-evidence", b2_ev)
+    if not b2_resp:
+        print("\n  B2 submission failed -- pipeline halted.")
+        return 1
+    b2_eval = b2_resp.get("evaluation") or {}
+    show_evaluation(b2_eval, "B2")
+    show_provenance(client, b2_eval.get("evaluation_id"))
+
+    if b2_eval.get("decision") != "ASSERT":
+        print("\n  B2 DEFER -- pipeline halted. Compliance violation.")
+        return 1
+    b2_eval_id = b2_eval.get("evaluation_id", "")
+    results.append(("B2", b2_eval_id, b2_eval.get("decision")))
+
+    # -- B3: Execution Authorization --
+    print(f"\n{'=' * 72}")
+    print("  STAGE 3: B3 Execution Authorization")
+    print(f"  Acquisition: caller_supplied_payload")
+    print(f"{'=' * 72}\n")
+
+    b3_ev = build_b3_evidence(p, b1_eval_id, b2_eval_id)
+    b3_resp = gather(client, "trading-b3-evidence", b3_ev)
+    if not b3_resp:
+        print("\n  B3 submission failed -- pipeline halted.")
+        return 1
+    b3_eval = b3_resp.get("evaluation") or {}
+    show_evaluation(b3_eval, "B3")
+    show_provenance(client, b3_eval.get("evaluation_id"))
+
+    if b3_eval.get("decision") != "ASSERT":
+        print("\n  B3 DEFER -- pipeline halted. Execution not authorized.")
+        return 1
+    b3_eval_id = b3_eval.get("evaluation_id", "")
+    results.append(("B3", b3_eval_id, b3_eval.get("decision")))
+
+    # -- Gateway: Verification + Submission --
+    print(f"\n{'=' * 72}")
+    print("  STAGE 4: Gateway Authorization Verification")
+    print(f"  Live: {live}")
+    print(f"{'=' * 72}\n")
+
+    dispatch_id = f"DISPATCH-PIPELINE-{int(time.time())}"
+    proposed = {
+        "account_id": p["account_id"],
+        "instrument_id": p["instrument_id"],
+        "asset_class": p["asset_class"],
+        "side": p["side"],
+        "quantity": p["quantity"],
+        "order_type": p["order_type"],
+        "order_ref": p["order_ref"],
+    }
+    if p["order_type"] == "limit":
+        proposed["limit_price_cents"] = p["limit_price_cents"]
+
+    gw_resp = gateway_api("POST", "/submit", {
+        "dispatch_id": dispatch_id,
+        "evaluation_id": b3_eval_id,
+        "proposed_order": proposed,
+        "live": live,
+    })
+    if gw_resp:
+        print(f"    Gateway status: {gw_resp.get('status')}")
+        if gw_resp.get("alpaca_order_id"):
+            print(f"    Alpaca order: {gw_resp.get('alpaca_order_id')}")
+        results.append(("GW", "", gw_resp.get("status", "unknown")))
+    else:
+        print("    Gateway submission failed")
+        results.append(("GW", "", "FAILED"))
+
+    # -- B4: Simulated Reconciliation --
+    print(f"\n{'=' * 72}")
+    print("  STAGE 5: B4 Execution Reconciliation (simulated)")
+    print(f"  Acquisition: caller_supplied_payload")
+    print(f"{'=' * 72}\n")
+
+    b4_evidence = {
+        "venue_authorization_reference": b3_eval_id,
+        "expected_authorization_reference": b3_eval_id,
+        "execution_status": "filled",
+        "executed_quantity": p["quantity"],
+        "authorized_quantity": p["quantity"],
+        "previous_executed_quantity": 0,
+        "executed_avg_price_cents": p["limit_price_cents"],
+        "authorized_price_ceiling_cents": p["limit_price_cents"],
+    }
+    b4_resp = gather(client, "trading-b4-evidence", b4_evidence)
+    if b4_resp:
+        b4_eval = b4_resp.get("evaluation") or {}
+        show_evaluation(b4_eval, "B4")
+        show_provenance(client, b4_eval.get("evaluation_id"))
+        b4_eval_id = b4_eval.get("evaluation_id", "")
+        if b4_eval_id:
+            show_replay(client, b4_eval_id)
+        results.append(("B4", b4_eval_id, b4_eval.get("decision")))
+
+    # -- Summary --
+    print(f"\n{'=' * 72}")
+    print("  Pipeline Summary")
+    print(f"{'=' * 72}")
+    for stage, eid, decision in results:
+        print(f"    {stage:<8} {decision:<12} {eid or ''}")
+    print(f"{'=' * 72}")
+
+    return 0
 
 
 # -- Benchmark mode ---------------------------------------------------------
@@ -848,6 +955,8 @@ def run_benchmark() -> None:
     print("  VB-OS Trading Reference -- Pipeline Benchmark")
     print(RULE)
     print()
+
+    client = _sdk_client()
     timings: list[tuple[str, float, str]] = []
 
     for key, (order_ref, label, _) in SCENARIOS.items():
@@ -855,7 +964,7 @@ def run_benchmark() -> None:
         if not p:
             continue
         start = time.monotonic()
-        run_pipeline(p, live=False)
+        run_pipeline(client, p, live=False)
         elapsed = time.monotonic() - start
         timings.append((key, elapsed, label))
         print(f"  {key}: {elapsed:.3f}s\n")
@@ -871,12 +980,15 @@ def run_benchmark() -> None:
 
 # -- CLI entry point --------------------------------------------------------
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description="VB-OS Trading Reference Demo")
     parser.add_argument("--list", action="store_true", help="List all scenarios")
-    parser.add_argument("--run", type=str, help="Run a specific scenario (e.g. A1) or group (e.g. A)")
+    parser.add_argument("--scenario", "--run", type=str, dest="run",
+                        help="Run a specific scenario (e.g. A1) or group (e.g. A)")
     parser.add_argument("--all", action="store_true", help="Run all A-E scenarios")
     parser.add_argument("--include-f", action="store_true", help="Include F-series in --all or --list")
+    parser.add_argument("--pipeline", action="store_true",
+                        help="Full B1->B2->B3->gateway->B4 pipeline (E1 happy path)")
     parser.add_argument("--live", type=str, nargs="?", const="ALL",
                         help="Run with live Alpaca submission (optionally specify scenario)")
     parser.add_argument("--benchmark", action="store_true", help="Run timing benchmark")
@@ -885,48 +997,64 @@ def main() -> None:
 
     if args.list:
         list_scenarios(include_f=args.include_f)
-        return
+        return 0
 
-    _init_state()
+    if not API_KEY or not PROJECT_ID:
+        print("Set VBOS_API_KEY and VBOS_PROJECT_ID (source .env first).")
+        return 1
+
+    if args.pipeline:
+        return run_full_pipeline(live=False)
+
+    client = _sdk_client()
 
     if args.benchmark:
         run_benchmark()
-        return
+        return 0
 
     if args.live:
         target = args.live
         if target == "ALL":
             for key in SCENARIOS:
-                run_scenario(key, live=True)
+                run_scenario(key, client, live=True)
         else:
-            run_scenario(target, live=True)
-        return
+            run_scenario(target, client, live=True)
+        return 0
 
     if args.all:
         scenarios = dict(SCENARIOS)
         if args.include_f:
             scenarios.update(F_SCENARIOS)
+        failures = 0
         for key in scenarios:
-            run_scenario(key, live=False)
+            result = run_scenario(key, client, live=False)
+            if result is None:
+                failures += 1
             print()
-        return
+            time.sleep(0.3)
+        print(f"\n{'=' * 72}")
+        passed = len(scenarios) - failures
+        print(f"  {passed}/{len(scenarios)} scenarios passed")
+        print(f"{'=' * 72}")
+        return 1 if failures else 0
 
     if args.run:
         target = args.run.upper()
         if target in {**SCENARIOS, **F_SCENARIOS}:
-            run_scenario(target, live=False)
+            run_scenario(target, client, live=False)
         else:
             matched = [k for k in {**SCENARIOS, **F_SCENARIOS} if k.startswith(target)]
             if matched:
                 for key in sorted(matched):
-                    run_scenario(key, live=False)
+                    run_scenario(key, client, live=False)
                     print()
             else:
                 print(f"No scenarios matching '{target}'")
-        return
+        return 0
 
     list_scenarios(include_f=True)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

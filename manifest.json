@@ -2,7 +2,7 @@
   "name": "vb-os-reference-trading",
   "version": "0.1.0",
   "description": "VB-OS reference integration for governed financial trading workflows (stocks and crypto)",
-  "homepage": "https://vbos.cloud",
+  "homepage": "https://vb-os.org",
   "license": "Apache-2.0",
   "author": "MNC Labs, Inc.",
   "boundaries": [

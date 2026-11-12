@@ -1,6 +1,10 @@
+# Copyright 2026 MNC Labs, Inc. Licensed under Apache 2.0.
+
 services:
   trading-postgres:
     image: postgres:16-alpine
+    container_name: trading-postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: trading
       POSTGRES_PASSWORD: trading
@@ -18,15 +22,11 @@ services:
 
   trading-gateway:
     build: .
+    container_name: trading-gateway
+    restart: unless-stopped
     entrypoint: ["python3", "execution_gateway.py"]
+    env_file: .env
     environment:
-      VBOS_API_URL: ${VBOS_API_URL:-https://api.vbos.cloud}
-      VBOS_API_KEY: ${VBOS_API_KEY}
-      VBOS_PROJECT_ID: ${VBOS_PROJECT_ID}
-      VBOS_ENVIRONMENT_ID: ${VBOS_ENVIRONMENT_ID}
-      ALPACA_API_KEY: ${ALPACA_API_KEY:-}
-      ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY:-}
-      ALPACA_BASE_URL: ${ALPACA_BASE_URL:-https://paper-api.alpaca.markets}
       DATABASE_URL: postgresql://trading:trading@trading-postgres:5432/trading
       GATEWAY_DB_PATH: /data/gateway.db
       GATEWAY_PORT: "9093"
@@ -38,8 +38,9 @@ services:
       trading-postgres:
         condition: service_healthy
 
-  app:
+  trading-app:
     build: .
+    container_name: trading-app
     env_file: .env
     environment:
       DATABASE_URL: postgresql://trading:trading@trading-postgres:5432/trading

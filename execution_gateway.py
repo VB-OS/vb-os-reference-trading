@@ -27,10 +27,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("gateway")
 
-VBOS_API_URL = os.environ.get("VBOS_API_URL", "https://api.vbos.cloud")
-VBOS_API_KEY = os.environ["VBOS_API_KEY"]
-VBOS_PROJECT_ID = os.environ["VBOS_PROJECT_ID"]
-VBOS_ENVIRONMENT_ID = os.environ["VBOS_ENVIRONMENT_ID"]
+VBOS_URL = os.environ.get("VBOS_URL", "https://api.vb-os.org")
+API_KEY = os.environ.get("VBOS_API_KEY", "")
+PROJECT_ID = os.environ.get("VBOS_PROJECT_ID", "")
+ENV_ID = os.environ.get("VBOS_ENVIRONMENT_ID", "")
 ALPACA_API_KEY = os.environ.get("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.environ.get("ALPACA_SECRET_KEY", "")
 ALPACA_BASE_URL = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
@@ -134,14 +134,14 @@ def _db() -> sqlite3.Connection:
 # ── VB-OS Cloud API ───────────────────────────────────────────────────────
 
 def vbos_api(method: str, path: str, body: dict | None = None) -> dict:
-    url = f"{VBOS_API_URL}{path}"
+    url = f"{VBOS_URL}{path}"
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(
         url,
         data=data,
         method=method,
         headers={
-            "Authorization": f"Bearer {VBOS_API_KEY}",
+            "Authorization": f"Bearer {API_KEY}",
             "Content-Type": "application/json",
         },
     )
@@ -158,20 +158,20 @@ def vbos_api(method: str, path: str, body: dict | None = None) -> dict:
 
 
 def read_sealed_evaluation(evaluation_id: str) -> dict:
-    path = f"/v1/projects/{VBOS_PROJECT_ID}/evaluations/{evaluation_id}"
+    path = f"/v1/projects/{PROJECT_ID}/evaluations/{evaluation_id}"
     return vbos_api("GET", path)
 
 
 def get_active_deployment(boundary_id: str) -> dict:
     path = (
-        f"/v1/projects/{VBOS_PROJECT_ID}/environments/{VBOS_ENVIRONMENT_ID}"
+        f"/v1/projects/{PROJECT_ID}/environments/{ENV_ID}"
         f"/deployments/active?boundary_id={boundary_id}"
     )
     return vbos_api("GET", path)
 
 
 def push_b4_evidence(connector_id: str, evidence: dict) -> dict:
-    path = f"/v1/projects/{VBOS_PROJECT_ID}/connectors/{connector_id}/gather"
+    path = f"/v1/projects/{PROJECT_ID}/connectors/{connector_id}/gather"
     return vbos_api("POST", path, {"raw_payload": evidence})
 
 

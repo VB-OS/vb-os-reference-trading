@@ -1,12 +1,59 @@
 # VB-OS Trading Reference Integration
 
-Reference implementation demonstrating VB-OS execution authority governance
-for financial trading workflows across equities and crypto.
+A reference implementation demonstrating governed financial trading workflows
+through [VB-OS Cloud](https://vb-os.org). This integration exercises all four
+governance boundaries -- order admissibility (B1), compliance authorization (B2),
+execution authorization (B3), and execution reconciliation (B4) -- with 45
+predicates evaluated before any trade reaches a venue.
 
-## What This Demonstrates
+VB-OS holds no trading or risk authority. It verifies provenance, not truth:
+was this order authorized, on what evidence, acquired from where, and can it be
+proven six months from now.
 
-A four-boundary governance pipeline evaluates every order through 45 predicates
-before any trade reaches a venue:
+## Quick Start
+
+See [SETUP.md](SETUP.md) for complete setup instructions -- from forking the
+template in VB-OS Cloud to running the full integration locally.
+
+### Docker (recommended)
+
+After completing VB-OS Cloud setup (SETUP.md Part 1) and creating your `.env`:
+
+```bash
+docker compose --profile app build
+docker compose up -d
+docker compose --profile app run --rm trading-app demo.py --pipeline
+```
+
+No local Python installation required. See SETUP.md Part 6 for details.
+
+## Architecture
+
+```
+Order Proposal (PostgreSQL)
+    |
+    v
+[B1 Order Admissibility]  --> DEFER (stop) or ASSERT -->
+[B2 Compliance Auth]       --> DEFER (stop) or ASSERT -->
+[B3 Execution Auth]        --> DEFER (stop) or ASSERT -->
+[Execution Gateway]        --> verify -> claim -> submit -> reconcile
+    |
+    v
+Alpaca Paper Trading (--live mode)
+    |
+    v
+[B4 Execution Reconciliation] <-- transactional outbox
+```
+
+## Acquisition Modes
+
+All four connectors use **caller-supplied payload**: the local scripts read
+from the trading database (accounts, instruments, market state), build evidence,
+and push it to VB-OS Cloud. VB-OS extracts evidence, evaluates the boundary,
+and records the provenance. The platform never touches the source system
+directly.
+
+## Boundaries
 
 | Boundary | Predicates | Purpose |
 |----------|-----------|---------|
@@ -15,102 +62,53 @@ before any trade reaches a venue:
 | B3 Execution Authorization | 16 | Trader authority, desk exposure, price tolerance, margin, authorization lifetime |
 | B4 Execution Reconciliation | 9 | Post-trade: fill monotonicity, quantity authority, price ceiling, identity match |
 
-The execution gateway independently verifies every sealed B3 authorization
-before submitting to Alpaca, enforcing three operations:
-
-1. **Authorization chain integrity** -- all three upstream evaluations ASSERT,
-   material order fields match across the chain
-2. **Arithmetic consistency** -- pre-computed notional, deviation, and threshold
-   fields are re-derived and compared
-3. **Submission binding** -- the proposed order matches the sealed authorization
-
-## Architecture
-
-```
-Order Proposal
-    |
-    v
-[B1 Admissibility] --> DEFER (stop) or ASSERT -->
-[B2 Compliance]    --> DEFER (stop) or ASSERT -->
-[B3 Authorization] --> DEFER (stop) or ASSERT -->
-[Gateway]          --> verify -> claim -> submit -> reconcile
-    |
-    v
-Alpaca Paper Trading (--live mode)
-    |
-    v
-[B4 Reconciliation] <-- transactional outbox
-```
-
-## Quick Start
-
-```bash
-# 1. Copy and fill environment variables
-cp .env.example .env
-# Edit .env with your VB-OS Cloud credentials
-
-# 2. Provision VB-OS Cloud boundaries, connectors, and flows
-docker compose run --rm app bootstrap.py
-
-# 3. List all scenarios
-docker compose run --rm app demo.py --list
-
-# 4. Run a single scenario
-docker compose run --rm app demo.py --run A1
-
-# 5. Run all governance scenarios
-docker compose run --rm app demo.py --all
-
-# 6. Run with live Alpaca paper trading
-docker compose run --rm app demo.py --live E1
-
-# 7. Run verification suite
-docker compose run --rm app verify.py --all
-
-# 8. Run timing benchmark
-docker compose run --rm app demo.py --benchmark
-```
-
 ## Scenarios
 
 ### Governance (A-E)
 
-- **A1-A5**: Equity admissibility (clean, suspended, buying power, market closed, sell)
-- **B1-B3**: Crypto admissibility (clean, exceeds position, session exemption)
-- **C1-C6**: Compliance (clean, restricted, concentration, position, cooldown, domain)
-- **D1-D5**: Execution authorization (clean, authority, desk limit, price, margin)
-- **E1-E5**: Reconciliation (full fill, partial, over-execution, slippage, identity)
+| Group | Scenarios | Focus |
+|-------|-----------|-------|
+| A1-A5 | Equity admissibility | Clean, suspended, buying power, market closed, sell |
+| B1-B3 | Crypto admissibility | Clean, exceeds position, session exemption |
+| C1-C6 | Compliance | Clean, restricted, concentration, position, cooldown, domain |
+| D1-D5 | Execution authorization | Clean, authority, desk limit, price, margin |
+| E1-E5 | Reconciliation | Full fill, partial, over-execution, slippage, identity |
 
 ### Architectural (F-series)
 
-- **F1**: Expired authorization
-- **F2**: Duplicate execution event deduplication
-- **F3**: Cumulative over-execution and regression detection
-- **F4**: Parameter mutation (submission binding)
-- **F5**: Autonomous strategy governance (centerpiece)
-- **F7**: Boundary version staleness
-- **F8**: Forged B2 lineage (cross-chain material mismatch)
-- **F9**: Notional inconsistency (arithmetic verification)
-- **F10**: UNCERTAIN broker recovery
-- **F11**: Concurrent authorization (parallel pipeline race)
-- **F12**: Stale market order evidence
-- **F13**: Transactional outbox crash recovery
-- **F14**: Price-only broker correction
-- **F15**: UNCERTAIN terminal state resolution
-- **F16**: Authorization consumption (exactly-once dispatch)
-- **F17**: Cross-chain order type mismatch
+| Scenario | Demonstration |
+|----------|---------------|
+| F1 | Expired authorization |
+| F2 | Duplicate execution event deduplication |
+| F3 | Cumulative over-execution and regression detection |
+| F4 | Parameter mutation (submission binding) |
+| F5 | Autonomous strategy governance (centerpiece) |
+| F7 | Boundary version staleness |
+| F8 | Forged B2 lineage (cross-chain material mismatch) |
+| F9 | Notional inconsistency (arithmetic verification) |
+| F10 | UNCERTAIN broker recovery |
+| F11 | Concurrent authorization (parallel pipeline race) |
+| F12 | Stale market order evidence |
+| F13 | Transactional outbox crash recovery |
+| F14 | Price-only broker correction |
+| F15 | UNCERTAIN terminal state resolution |
+| F16 | Authorization consumption (exactly-once dispatch) |
+| F17 | Cross-chain order type mismatch |
 
-## Files
+Run `python3 demo.py --list` for descriptions, or `python3 demo.py --all` to
+run all governance scenarios. `python3 demo.py --pipeline` runs the full
+B1 -> B2 -> B3 -> Gateway -> B4 pipeline end-to-end.
 
-| File | Purpose |
-|------|---------|
-| `boundaries/*.dsl` | VB-OS boundary definitions (VBL v2) |
-| `seed.sql` | PostgreSQL schema and seed data for all scenarios |
-| `seed_template.py` | Register template in VB-OS Cloud template registry |
-| `bootstrap.py` | Idempotent VB-OS Cloud provisioning (boundaries, connectors, flows) |
-| `execution_gateway.py` | Persistent gateway with SQLite state, verification, Alpaca submission |
-| `demo.py` | Scenario orchestration and pipeline runner |
-| `verify.py` | Verification suite (parity, integrity, counterfactual, expiration) |
+## Verification Suite
+
+`verify.py` contains four deterministic verification tests:
+
+| Test | Proves |
+|------|--------|
+| Parity | Replay every sealed evaluation, confirm decision parity |
+| Integrity | Re-derive B3 pre-computed fields, compare to sealed values |
+| Counterfactual | Clean B1 ASSERT, then suspended account DEFER |
+| Expiration | Full pipeline with short validity, wait, verify gateway rejects |
 
 ## Integer Arithmetic
 
@@ -123,6 +121,32 @@ No floating-point arithmetic anywhere in the evaluation pipeline.
 - Price deviation: `(limit - reference) * 10000` (scaled to avoid division)
 - Tolerance threshold: `tolerance_bps * reference_price_cents`
 
+## Directory Structure
+
+```
+vb-os-reference-trading/
+├── SETUP.md               # Complete setup guide
+├── Dockerfile             # Container image for integration scripts
+├── docker-compose.yml     # PostgreSQL + gateway + app container
+├── requirements.txt       # Pinned Python dependencies
+├── demo.py                # Scenario runner (--run, --all, --pipeline, --live)
+├── verify.py              # Deterministic verification suite
+├── execution_gateway.py   # Authorization verification, Alpaca submission, B4 outbox
+├── bootstrap.py           # (Optional) Standalone VB-OS provisioning
+├── seed_template.py       # (Admin) Register template in template registry
+├── seed.sql               # PostgreSQL schema and seed data for all scenarios
+├── manifest.json          # Machine-readable integration metadata
+├── .env.example           # Environment variable template
+├── vendor/                # Vendored VB-OS Python SDK (not yet on PyPI)
+│   └── vb_os-0.1.0.tar.gz
+└── boundaries/            # VB-OS DSL boundary definitions (VBL v2)
+    ├── B_ORDER_ADMISSIBILITY.dsl
+    ├── B_COMPLIANCE_AUTHORIZATION.dsl
+    ├── B_EXECUTION_AUTHORIZATION.dsl
+    └── B_EXECUTION_RECONCILIATION.dsl
+```
+
 ## License
 
-Apache 2.0. Copyright 2026 MNC Labs, Inc.
+Copyright 2026 MNC Labs, Inc. Licensed under the Apache License, Version 2.0.
+See [LICENSE](LICENSE) for the full text.
