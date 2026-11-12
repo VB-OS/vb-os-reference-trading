@@ -37,10 +37,10 @@
     "crypto"
   ],
   "connectors": [
-    "b1-order-admissibility",
-    "b2-compliance-authorization",
-    "b3-execution-authorization",
-    "b4-execution-reconciliation"
+    "trading-b1-evidence",
+    "trading-b2-evidence",
+    "trading-b3-evidence",
+    "trading-b4-evidence"
   ],
   "acquisition_mode": "caller_supplied_payload"
 }
