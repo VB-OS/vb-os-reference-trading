@@ -27,6 +27,7 @@ services:
       ALPACA_API_KEY: ${ALPACA_API_KEY:-}
       ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY:-}
       ALPACA_BASE_URL: ${ALPACA_BASE_URL:-https://paper-api.alpaca.markets}
+      DATABASE_URL: postgresql://trading:trading@trading-postgres:5432/trading
       GATEWAY_DB_PATH: /data/gateway.db
       GATEWAY_PORT: "9093"
     volumes:

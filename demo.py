@@ -559,6 +559,10 @@ def run_scenario(key: str, live: bool = False) -> dict | None:
         print(f"  ERROR: proposal {order_ref} not found in database")
         return None
 
+    # A4 override: market_session_open must be 0 (DB keeps MSFT open for other scenarios)
+    if key == "A4":
+        p["market_session_open"] = 0
+
     # F-series scenarios with special handling
     if key.startswith("F"):
         return run_f_scenario(key, p, live)
