@@ -1,0 +1,46 @@
+{
+  "name": "vb-os-reference-trading",
+  "version": "0.1.0",
+  "description": "VB-OS reference integration for governed financial trading workflows (stocks and crypto)",
+  "homepage": "https://vbos.cloud",
+  "license": "Apache-2.0",
+  "author": "MNC Labs, Inc.",
+  "boundaries": [
+    {
+      "id": "B_ORDER_ADMISSIBILITY",
+      "predicates": 10,
+      "scope": "trading/order-governance"
+    },
+    {
+      "id": "B_COMPLIANCE_AUTHORIZATION",
+      "predicates": 10,
+      "scope": "trading/order-governance"
+    },
+    {
+      "id": "B_EXECUTION_AUTHORIZATION",
+      "predicates": 16,
+      "scope": "trading/order-governance"
+    },
+    {
+      "id": "B_EXECUTION_RECONCILIATION",
+      "predicates": 9,
+      "scope": "trading/order-governance"
+    }
+  ],
+  "scenarios": {
+    "governance": 30,
+    "architectural": 17,
+    "total": 47
+  },
+  "asset_classes": [
+    "equity",
+    "crypto"
+  ],
+  "connectors": [
+    "b1-order-admissibility",
+    "b2-compliance-authorization",
+    "b3-execution-authorization",
+    "b4-execution-reconciliation"
+  ],
+  "acquisition_mode": "caller_supplied_payload"
+}
