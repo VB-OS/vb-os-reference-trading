@@ -1,0 +1,66 @@
+# Copyright 2026 MNC Labs, Inc. Licensed under Apache 2.0.
+# Author: Asaad Riaz
+
+services:
+  trading-postgres:
+    image: postgres:16-alpine
+    container_name: trading-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: trading
+      POSTGRES_PASSWORD: trading
+      POSTGRES_DB: trading
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./seed.sql:/docker-entrypoint-initdb.d/01-seed.sql:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - trading-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trading"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  trading-gateway:
+    build: .
+    container_name: trading-gateway
+    restart: unless-stopped
+    entrypoint: ["python3", "execution_gateway.py"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://trading:trading@trading-postgres:5432/trading
+      GATEWAY_DB_PATH: /data/gateway.db
+      GATEWAY_PORT: "9093"
+    ports:
+      - "9093:9093"
+    volumes:
+      - gateway-data:/data
+    networks:
+      - trading-net
+    depends_on:
+      trading-postgres:
+        condition: service_healthy
+
+  trading-app:
+    build: .
+    container_name: trading-app
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://trading:trading@trading-postgres:5432/trading
+      GATEWAY_URL: http://trading-gateway:9093
+    networks:
+      - trading-net
+    depends_on:
+      trading-postgres:
+        condition: service_healthy
+    profiles:
+      - app
+
+volumes:
+  pgdata:
+  gateway-data:
+
+networks:
+  trading-net:

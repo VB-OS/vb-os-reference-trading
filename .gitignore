@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+.env
+.bootstrap-state.json
+*.db
+*.sqlite
+.DS_Store
+node_modules/
