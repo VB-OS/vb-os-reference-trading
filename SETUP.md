@@ -6,10 +6,14 @@
 
 ---
 
-Complete setup and execution guide for the governed financial trading pipeline.
-Covers order admissibility (B1), compliance authorization (B2), execution
-authorization (B3), and execution reconciliation (B4) -- all four boundaries
-evaluated by VB-OS Cloud with evidence pushed from a local OMS database.
+This guide walks you through setting up and running the governed financial
+trading pipeline. By the end, you will have a working integration that
+evaluates trade orders across four governance stages -- admissibility,
+compliance, execution authorization, and post-trade reconciliation -- with
+every decision sealed and replayable through VB-OS Cloud.
+
+See [README.md](README.md) for the full problem statement and what this
+integration demonstrates.
 
 ---
 

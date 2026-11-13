@@ -5,13 +5,67 @@
 
 ---
 
-A reference implementation demonstrating governed financial trading workflows
-through [VB-OS Cloud](https://vbos.cloud), the verification-as-a-service
-platform built by [MNC Labs](https://mnclabs.com). This integration exercises
-all four governance boundaries -- order admissibility (B1), compliance
-authorization (B2), execution authorization (B3), and execution reconciliation
-(B4) -- with 45 predicates evaluated by the VB-OS binary before any trade
-reaches a venue.
+## The Problem
+
+Every trading firm has compliance checks, risk limits, and authorization
+workflows. But in practice, these controls are scattered across systems --
+an OMS checks one thing, a compliance engine checks another, a risk system
+checks a third -- and no one can answer a simple question after the fact:
+**was this trade fully authorized, by whom, on what evidence, and can you
+prove it?**
+
+When regulators ask, when audits happen, when something goes wrong, the
+answer is a manual reconstruction from logs across multiple systems. There is
+no sealed, tamper-evident record that captures the full authorization chain
+from order proposal to execution reconciliation. If a trader exceeded their
+desk limit, if a restricted security slipped through, if an expired
+authorization was used -- the gap may not surface until weeks or months later.
+
+## What VB-OS Does Differently
+
+VB-OS creates a **deterministic governance pipeline** where every trade passes
+through a sequence of boundary evaluations before it can execute. Each boundary
+checks a specific dimension -- account eligibility, compliance rules, execution
+authority, post-trade reconciliation -- and produces a sealed, replayable
+decision:
+
+- **ASSERT** means the evidence satisfied every condition. The trade can proceed.
+- **DEFER** means something failed. The trade is blocked, and the record says
+  exactly which condition failed, what evidence was missing, and what policy
+  was in effect.
+
+Every decision is sealed with full provenance: what evidence was submitted,
+from which source system, at what version, at what time. Six months later,
+you can replay the exact same evaluation and get the exact same result. This
+is not a log or an audit trail -- it is a cryptographically deterministic
+record of the governance decision.
+
+## What This Integration Demonstrates
+
+This repository is a working reference implementation of a governed trading
+pipeline with four stages:
+
+1. **Order Admissibility** -- Is the account active? Does the trader have
+   buying power? Is the market open? Is the instrument eligible?
+2. **Compliance Authorization** -- Does the order match the investment mandate?
+   Is concentration within limits? Is the security on the restricted list?
+3. **Execution Authorization** -- Does the trader have authority for this
+   size? Is desk exposure within limits? Is the price within tolerance?
+4. **Execution Reconciliation** -- After the trade executes, does the fill
+   match what was authorized? Is the price within the ceiling? Does the
+   execution identity match?
+
+Each stage gates the next -- a DEFER at any boundary halts the pipeline.
+The integration includes 42 scenarios covering clean trades, account
+suspensions, compliance violations, expired authorizations, post-trade
+reconciliation failures, and architectural edge cases like duplicate
+execution events and concurrent authorization races.
+
+It connects to **Alpaca paper trading** for live order submission, so you
+can see the full cycle: governance evaluation, real broker execution, and
+post-trade reconciliation -- all with sealed VB-OS records.
+
+---
 
 VB-OS holds no trading or risk authority. It verifies provenance, not truth:
 was this order authorized, on what evidence, acquired from where, and can it be
