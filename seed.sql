@@ -1,3 +1,6 @@
+-- Copyright 2026 MNC Labs, Inc. Licensed under Apache 2.0.
+-- Author: Asaad Riaz
+--
 -- VB-OS Trading Reference Integration -- seed data.
 --
 -- Every monetary value is in cents and every proportion in basis points.

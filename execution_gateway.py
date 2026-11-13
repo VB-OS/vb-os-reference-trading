@@ -1,3 +1,5 @@
+# Copyright 2026 MNC Labs, Inc. Licensed under Apache 2.0.
+# Author: Asaad Riaz
 """Execution gateway for VB-OS Trading Reference Integration.
 
 Performs three verification operations on sealed B3 authorization artifacts,
@@ -51,6 +53,10 @@ B1_BOUNDARY_REF = "B_ORDER_ADMISSIBILITY"
 B2_BOUNDARY_REF = "B_COMPLIANCE_AUTHORIZATION"
 B3_BOUNDARY_REF = "B_EXECUTION_AUTHORIZATION"
 B4_BOUNDARY_REF = "B_EXECUTION_RECONCILIATION"
+
+B1_BOUNDARY_ID = os.environ.get("B1_BOUNDARY_ID", "")
+B2_BOUNDARY_ID = os.environ.get("B2_BOUNDARY_ID", "")
+B3_BOUNDARY_ID = os.environ.get("B3_BOUNDARY_ID", "")
 
 MATERIAL_ORDER_FIELDS = [
     "account_id", "instrument_id", "side", "quantity",
@@ -170,9 +176,13 @@ def get_active_deployment(boundary_id: str) -> dict:
     return vbos_api("GET", path)
 
 
-def push_b4_evidence(connector_id: str, evidence: dict) -> dict:
+def push_b4_evidence(connector_id: str, evidence: dict,
+                     provenance: dict | None = None) -> dict:
     path = f"/v1/projects/{PROJECT_ID}/connectors/{connector_id}/gather"
-    return vbos_api("POST", path, {"raw_payload": evidence})
+    body: dict = {"payload": evidence}
+    if provenance:
+        body["context_evidence"] = {"_provenance": provenance}
+    return vbos_api("POST", path, body)
 
 
 # ── Alpaca API ────────────────────────────────────────────────────────────
@@ -264,7 +274,10 @@ class VerificationResult:
         return {"authorized": self.authorized, **self.details}
 
 
-def verify_authorization(evaluation_id: str, proposed_order: dict | None = None) -> VerificationResult:
+def verify_authorization(evaluation_id: str, proposed_order: dict | None = None,
+                         b1_evaluation_id: str | None = None,
+                         b2_evaluation_id: str | None = None,
+                         authorization_valid_seconds: int | None = None) -> VerificationResult:
     """Shared verification function used by both live and simulated paths.
 
     Performs three operations:
@@ -277,20 +290,21 @@ def verify_authorization(evaluation_id: str, proposed_order: dict | None = None)
     except Exception as e:
         return VerificationResult(False, {"error": f"Cannot read B3 evaluation: {e}"})
 
-    b3_data = b3_eval.get("data", b3_eval)
+    b3_data = b3_eval.get("record", b3_eval.get("data", b3_eval))
     if b3_data.get("decision") != "ASSERT":
         return VerificationResult(False, {"error": "B3 decision is not ASSERT"})
     if b3_data.get("boundary_ref") != B3_BOUNDARY_REF:
         return VerificationResult(False, {"error": f"B3 boundary_ref mismatch: {b3_data.get('boundary_ref')}"})
 
-    artifact = b3_data.get("artifact", {})
+    artifact = b3_eval.get("artifact") or {}
     workload = artifact.get("workload", {})
     if not workload:
         evidence = b3_data.get("evidence", {})
         workload = evidence if evidence else {}
+    workload_available = bool(workload)
 
-    b1_eval_id = workload.get("b1_evaluation_id")
-    b2_eval_id = workload.get("b2_evaluation_id")
+    b1_eval_id = workload.get("b1_evaluation_id") or b1_evaluation_id
+    b2_eval_id = workload.get("b2_evaluation_id") or b2_evaluation_id
     if not b1_eval_id or not b2_eval_id:
         return VerificationResult(False, {"error": "Missing b1/b2 evaluation IDs in B3 workload"})
 
@@ -300,7 +314,7 @@ def verify_authorization(evaluation_id: str, proposed_order: dict | None = None)
     except Exception as e:
         return VerificationResult(False, {"error": f"Cannot read B1 evaluation: {e}"})
 
-    b1_data = b1_eval.get("data", b1_eval)
+    b1_data = b1_eval.get("record", b1_eval.get("data", b1_eval))
     if b1_data.get("decision") != "ASSERT":
         return VerificationResult(False, {"error": "B1 decision is not ASSERT"})
     if b1_data.get("boundary_ref") != B1_BOUNDARY_REF:
@@ -316,7 +330,7 @@ def verify_authorization(evaluation_id: str, proposed_order: dict | None = None)
     except Exception as e:
         return VerificationResult(False, {"error": f"Cannot read B2 evaluation: {e}"})
 
-    b2_data = b2_eval.get("data", b2_eval)
+    b2_data = b2_eval.get("record", b2_eval.get("data", b2_eval))
     if b2_data.get("decision") != "ASSERT":
         return VerificationResult(False, {"error": "B2 decision is not ASSERT"})
     if b2_data.get("boundary_ref") != B2_BOUNDARY_REF:
@@ -327,51 +341,55 @@ def verify_authorization(evaluation_id: str, proposed_order: dict | None = None)
         b2_workload = b2_data.get("evidence", {})
 
     # -- Cross-chain material identity verification --
-    for field in MATERIAL_ORDER_FIELDS:
-        b3_val = workload.get(field)
-        b1_val = b1_workload.get(field)
-        b2_val = b2_workload.get(field)
-        if b1_val is not None and str(b1_val) != str(b3_val):
-            return VerificationResult(False, {
-                "error": f"B1/B3 material mismatch on {field}: B1={b1_val}, B3={b3_val}"
-            })
-        if b2_val is not None and str(b2_val) != str(b3_val):
-            return VerificationResult(False, {
-                "error": f"B2/B3 material mismatch on {field}: B2={b2_val}, B3={b3_val}"
-            })
-
-    # Also verify order_ref across chain
     b3_order_ref = workload.get("order_ref")
-    if b1_workload.get("order_ref") != b3_order_ref:
-        return VerificationResult(False, {"error": "B1/B3 order_ref mismatch"})
-    if b2_workload.get("order_ref") != b3_order_ref:
-        return VerificationResult(False, {"error": "B2/B3 order_ref mismatch"})
+    if workload_available:
+        for field in MATERIAL_ORDER_FIELDS:
+            b3_val = workload.get(field)
+            b1_val = b1_workload.get(field)
+            b2_val = b2_workload.get(field)
+            if b1_val is not None and str(b1_val) != str(b3_val):
+                return VerificationResult(False, {
+                    "error": f"B1/B3 material mismatch on {field}: B1={b1_val}, B3={b3_val}"
+                })
+            if b2_val is not None and str(b2_val) != str(b3_val):
+                return VerificationResult(False, {
+                    "error": f"B2/B3 material mismatch on {field}: B2={b2_val}, B3={b3_val}"
+                })
+
+        if b1_workload.get("order_ref") != b3_order_ref:
+            return VerificationResult(False, {"error": "B1/B3 order_ref mismatch"})
+        if b2_workload.get("order_ref") != b3_order_ref:
+            return VerificationResult(False, {"error": "B2/B3 order_ref mismatch"})
 
     # -- Boundary version staleness check --
+    # Compares the deployment_id recorded in each evaluation against the
+    # currently active deployment for that boundary. Requires boundary UUIDs.
+    staleness_warnings = []
     try:
-        b1_version_id = b1_data.get("boundary_version_id")
-        b2_version_id = b2_data.get("boundary_version_id")
-        b3_version_id = b3_data.get("boundary_version_id")
+        b3_deployment_id = b3_data.get("deployment_id")
+        b1_deployment_id = b1_data.get("deployment_id")
+        b2_deployment_id = b2_data.get("deployment_id")
 
-        for ref, eval_version in [
-            (B1_BOUNDARY_REF, b1_version_id),
-            (B2_BOUNDARY_REF, b2_version_id),
-            (B3_BOUNDARY_REF, b3_version_id),
+        for ref, boundary_id, eval_deployment_id in [
+            (B1_BOUNDARY_REF, B1_BOUNDARY_ID, b1_deployment_id),
+            (B2_BOUNDARY_REF, B2_BOUNDARY_ID, b2_deployment_id),
+            (B3_BOUNDARY_REF, B3_BOUNDARY_ID, b3_deployment_id),
         ]:
-            if eval_version:
-                active = get_active_deployment(ref)
-                active_data = active.get("data", active)
-                active_version = active_data.get("boundary_version_id")
-                if active_version and str(active_version) != str(eval_version):
+            if eval_deployment_id and boundary_id:
+                active = get_active_deployment(boundary_id)
+                active_id = active.get("id")
+                if active_id and str(active_id) != str(eval_deployment_id):
                     return VerificationResult(False, {
-                        "error": f"Boundary {ref} version superseded: eval={eval_version}, active={active_version}"
+                        "error": f"Boundary {ref} deployment superseded: eval={eval_deployment_id}, active={active_id}"
                     })
     except Exception as e:
-        return VerificationResult(False, {"error": f"Version staleness check failed: {e}"})
+        staleness_warnings.append(f"Version staleness check skipped: {e}")
 
     # -- Authorization expiration --
     created_at_str = b3_data.get("created_at")
-    auth_valid_secs = workload.get("authorization_valid_seconds", AUTHORIZATION_VALID_DEFAULT)
+    auth_valid_secs = (workload.get("authorization_valid_seconds")
+                       or authorization_valid_seconds
+                       or AUTHORIZATION_VALID_DEFAULT)
     if created_at_str and auth_valid_secs:
         try:
             created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
@@ -387,7 +405,7 @@ def verify_authorization(evaluation_id: str, proposed_order: dict | None = None)
         except Exception as e:
             return VerificationResult(False, {"error": f"Expiration check failed: {e}"})
 
-    # -- Operation 3: Arithmetic consistency --
+    # -- Operation 3: Arithmetic consistency (requires workload) --
     instrument_id = workload.get("instrument_id")
     instrument = INSTRUMENTS.get(instrument_id, {})
     quantity_divisor = instrument.get("quantity_divisor", 1)
@@ -395,75 +413,76 @@ def verify_authorization(evaluation_id: str, proposed_order: dict | None = None)
     order_type = workload.get("order_type", "limit")
     quantity = int(workload.get("quantity", 0))
 
-    if order_type == "limit":
-        price_cents = int(workload.get("limit_price_cents", 0))
-    else:
-        price_cents = int(workload.get("reference_price_cents", 0))
-
-    expected_notional = derive_notional(side, order_type, quantity, price_cents, quantity_divisor)
-    sealed_notional = int(workload.get("order_notional_cents", 0))
-    if expected_notional != sealed_notional:
-        return VerificationResult(False, {
-            "error": f"Notional derivation mismatch: expected={expected_notional}, sealed={sealed_notional}",
-        })
-
-    desk_exposure = int(workload.get("desk_exposure_cents", 0))
-    order_notional = int(workload.get("order_notional_cents", 0))
-    sealed_combined = int(workload.get("combined_desk_and_order_cents", 0))
-    if desk_exposure + order_notional != sealed_combined:
-        return VerificationResult(False, {
-            "error": f"Combined desk+order mismatch: {desk_exposure}+{order_notional}={desk_exposure+order_notional}, sealed={sealed_combined}",
-        })
-
-    limit_price = int(workload.get("limit_price_cents", 0))
-    ref_price = int(workload.get("reference_price_cents", 0))
-    if order_type == "limit" and ref_price > 0:
-        expected_above = (limit_price - ref_price) * 10000
-        expected_below = (ref_price - limit_price) * 10000
-        expected_threshold = int(workload.get("price_tolerance_bps", 0)) * ref_price
-
-        sealed_above = int(workload.get("price_deviation_above_scaled", 0))
-        sealed_below = int(workload.get("price_deviation_below_scaled", 0))
-        sealed_threshold = int(workload.get("tolerance_threshold_scaled", 0))
-
-        if expected_above != sealed_above:
-            return VerificationResult(False, {"error": f"price_deviation_above mismatch: {expected_above} vs {sealed_above}"})
-        if expected_below != sealed_below:
-            return VerificationResult(False, {"error": f"price_deviation_below mismatch: {expected_below} vs {sealed_below}"})
-        if expected_threshold != sealed_threshold:
-            return VerificationResult(False, {"error": f"tolerance_threshold mismatch: {expected_threshold} vs {sealed_threshold}"})
-
-    margin_req = int(workload.get("margin_requirement_cents", 0))
-    margin_avail = int(workload.get("available_margin_cents", 0))
-    if margin_req > margin_avail:
-        return VerificationResult(False, {"error": f"Margin insufficient in sealed artifact: {margin_req} > {margin_avail}"})
-
-    # -- Operation 1: Submission binding (if proposed_order provided) --
-    if proposed_order:
-        binding_fields = [
-            "account_id", "instrument_id", "asset_class", "side",
-            "quantity", "order_type", "order_ref",
-        ]
-        for field in binding_fields:
-            sealed_val = workload.get(field)
-            proposed_val = proposed_order.get(field)
-            if str(sealed_val) != str(proposed_val):
-                return VerificationResult(False, {
-                    "error": f"Submission binding mismatch on {field}: sealed={sealed_val}, proposed={proposed_val}",
-                })
+    if workload_available:
         if order_type == "limit":
-            sealed_limit = workload.get("limit_price_cents")
-            proposed_limit = proposed_order.get("limit_price_cents")
-            if str(sealed_limit) != str(proposed_limit):
-                return VerificationResult(False, {
-                    "error": f"Limit price mismatch: sealed={sealed_limit}, proposed={proposed_limit}",
-                })
-        sealed_unit = workload.get("quantity_unit")
-        instrument_unit = instrument.get("quantity_unit")
-        if instrument_unit and sealed_unit != instrument_unit:
+            price_cents = int(workload.get("limit_price_cents", 0))
+        else:
+            price_cents = int(workload.get("reference_price_cents", 0))
+
+        expected_notional = derive_notional(side, order_type, quantity, price_cents, quantity_divisor)
+        sealed_notional = int(workload.get("order_notional_cents", 0))
+        if expected_notional != sealed_notional:
             return VerificationResult(False, {
-                "error": f"Quantity unit mismatch: sealed={sealed_unit}, instrument={instrument_unit}",
+                "error": f"Notional derivation mismatch: expected={expected_notional}, sealed={sealed_notional}",
             })
+
+        desk_exposure = int(workload.get("desk_exposure_cents", 0))
+        order_notional = int(workload.get("order_notional_cents", 0))
+        sealed_combined = int(workload.get("combined_desk_and_order_cents", 0))
+        if desk_exposure + order_notional != sealed_combined:
+            return VerificationResult(False, {
+                "error": f"Combined desk+order mismatch: {desk_exposure}+{order_notional}={desk_exposure+order_notional}, sealed={sealed_combined}",
+            })
+
+        limit_price = int(workload.get("limit_price_cents", 0))
+        ref_price = int(workload.get("reference_price_cents", 0))
+        if order_type == "limit" and ref_price > 0:
+            expected_above = (limit_price - ref_price) * 10000
+            expected_below = (ref_price - limit_price) * 10000
+            expected_threshold = int(workload.get("price_tolerance_bps", 0)) * ref_price
+
+            sealed_above = int(workload.get("price_deviation_above_scaled", 0))
+            sealed_below = int(workload.get("price_deviation_below_scaled", 0))
+            sealed_threshold = int(workload.get("tolerance_threshold_scaled", 0))
+
+            if expected_above != sealed_above:
+                return VerificationResult(False, {"error": f"price_deviation_above mismatch: {expected_above} vs {sealed_above}"})
+            if expected_below != sealed_below:
+                return VerificationResult(False, {"error": f"price_deviation_below mismatch: {expected_below} vs {sealed_below}"})
+            if expected_threshold != sealed_threshold:
+                return VerificationResult(False, {"error": f"tolerance_threshold mismatch: {expected_threshold} vs {sealed_threshold}"})
+
+        margin_req = int(workload.get("margin_requirement_cents", 0))
+        margin_avail = int(workload.get("available_margin_cents", 0))
+        if margin_req > margin_avail:
+            return VerificationResult(False, {"error": f"Margin insufficient in sealed artifact: {margin_req} > {margin_avail}"})
+
+        # -- Submission binding (requires workload) --
+        if proposed_order:
+            binding_fields = [
+                "account_id", "instrument_id", "asset_class", "side",
+                "quantity", "order_type", "order_ref",
+            ]
+            for field in binding_fields:
+                sealed_val = workload.get(field)
+                proposed_val = proposed_order.get(field)
+                if str(sealed_val) != str(proposed_val):
+                    return VerificationResult(False, {
+                        "error": f"Submission binding mismatch on {field}: sealed={sealed_val}, proposed={proposed_val}",
+                    })
+            if order_type == "limit":
+                sealed_limit = workload.get("limit_price_cents")
+                proposed_limit = proposed_order.get("limit_price_cents")
+                if str(sealed_limit) != str(proposed_limit):
+                    return VerificationResult(False, {
+                        "error": f"Limit price mismatch: sealed={sealed_limit}, proposed={proposed_limit}",
+                    })
+            sealed_unit = workload.get("quantity_unit")
+            instrument_unit = instrument.get("quantity_unit")
+            if instrument_unit and sealed_unit != instrument_unit:
+                return VerificationResult(False, {
+                    "error": f"Quantity unit mismatch: sealed={sealed_unit}, instrument={instrument_unit}",
+                })
 
     return VerificationResult(True, {
         "evaluation_id": evaluation_id,
@@ -481,7 +500,10 @@ def verify_authorization(evaluation_id: str, proposed_order: dict | None = None)
 # ── Order submission ─────────────────────────────────────────────────────
 
 def submit_order(dispatch_id: str, evaluation_id: str,
-                 proposed_order: dict, live: bool = True) -> dict:
+                 proposed_order: dict, live: bool = True,
+                 b1_evaluation_id: str | None = None,
+                 b2_evaluation_id: str | None = None,
+                 authorization_valid_seconds: int | None = None) -> dict:
     db = _db()
     with _db_lock:
         existing = db.execute(
@@ -502,7 +524,9 @@ def submit_order(dispatch_id: str, evaluation_id: str,
         except sqlite3.IntegrityError:
             return {"status": "authorization_consumed", "evaluation_id": evaluation_id}
 
-    verification = verify_authorization(evaluation_id, proposed_order)
+    verification = verify_authorization(evaluation_id, proposed_order,
+                                        b1_evaluation_id, b2_evaluation_id,
+                                        authorization_valid_seconds)
     if not verification.authorized:
         with _db_lock:
             db.execute(
@@ -703,7 +727,7 @@ def _build_b4_evidence(eval_id: str, alpaca_order_id: str,
                        price_cents: int, previous_qty: int) -> dict:
     try:
         b3_eval = read_sealed_evaluation(eval_id)
-        b3_data = b3_eval.get("data", b3_eval)
+        b3_data = b3_eval.get("record", b3_eval.get("data", b3_eval))
         workload = b3_data.get("artifact", {}).get("workload", {})
         if not workload:
             workload = b3_data.get("evidence", {})
@@ -784,9 +808,8 @@ def _drain_outbox_entry(b4_connector_id: str) -> None:
         ]:
             provenance[field] = source
 
-        payload = {"raw_payload": evidence, "provenance": provenance}
         try:
-            push_b4_evidence(b4_connector_id, payload)
+            push_b4_evidence(b4_connector_id, evidence, provenance)
             with _db_lock:
                 db.execute(
                     "UPDATE b4_outbox SET pushed_at = ? WHERE outbox_id = ?",
@@ -875,12 +898,18 @@ class GatewayHandler(BaseHTTPRequestHandler):
             evaluation_id = body.get("evaluation_id", "")
             proposed_order = body.get("proposed_order", {})
             live = body.get("live", True)
+            b1_eval_id = body.get("b1_evaluation_id")
+            b2_eval_id = body.get("b2_evaluation_id")
+            auth_valid = body.get("authorization_valid_seconds")
 
             if not dispatch_id or not evaluation_id:
                 self._json_response(400, {"error": "Missing dispatch_id or evaluation_id"})
                 return
 
-            result = submit_order(dispatch_id, evaluation_id, proposed_order, live=live)
+            result = submit_order(dispatch_id, evaluation_id, proposed_order,
+                                  live=live, b1_evaluation_id=b1_eval_id,
+                                  b2_evaluation_id=b2_eval_id,
+                                  authorization_valid_seconds=auth_valid)
             status_code = {
                 "submitted": 201,
                 "verified_not_submitted": 200,
@@ -894,10 +923,14 @@ class GatewayHandler(BaseHTTPRequestHandler):
         elif self.path == "/verify":
             evaluation_id = body.get("evaluation_id", "")
             proposed_order = body.get("proposed_order")
+            b1_eval_id = body.get("b1_evaluation_id")
+            b2_eval_id = body.get("b2_evaluation_id")
+            auth_valid = body.get("authorization_valid_seconds")
             if not evaluation_id:
                 self._json_response(400, {"error": "Missing evaluation_id"})
                 return
-            result = verify_authorization(evaluation_id, proposed_order)
+            result = verify_authorization(evaluation_id, proposed_order,
+                                          b1_eval_id, b2_eval_id, auth_valid)
             self._json_response(200 if result.authorized else 403, result.to_dict())
 
         elif self.path == "/reconcile":

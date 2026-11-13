@@ -1,14 +1,23 @@
 # VB-OS Trading Reference Integration
 
+**Author:** [Asaad Riaz](https://github.com/anriaz) -- Founder, MNC Labs, Inc.
+**Platform:** [VB-OS Cloud](https://vbos.cloud) | [Documentation](https://vb-os.org) | [GitHub](https://github.com/VB-OS)
+
+---
+
 A reference implementation demonstrating governed financial trading workflows
-through [VB-OS Cloud](https://vb-os.org). This integration exercises all four
-governance boundaries -- order admissibility (B1), compliance authorization (B2),
-execution authorization (B3), and execution reconciliation (B4) -- with 45
-predicates evaluated before any trade reaches a venue.
+through [VB-OS Cloud](https://vbos.cloud), the verification-as-a-service
+platform built by [MNC Labs](https://mnclabs.com). This integration exercises
+all four governance boundaries -- order admissibility (B1), compliance
+authorization (B2), execution authorization (B3), and execution reconciliation
+(B4) -- with 45 predicates evaluated by the VB-OS binary before any trade
+reaches a venue.
 
 VB-OS holds no trading or risk authority. It verifies provenance, not truth:
 was this order authorized, on what evidence, acquired from where, and can it be
-proven six months from now.
+proven six months from now. The evaluation engine is integer-only, deterministic,
+and replay-safe -- the same input artifact, boundary snapshot, and binary version
+always produce the same decision.
 
 ## Quick Start
 
@@ -146,7 +155,26 @@ vb-os-reference-trading/
     └── B_EXECUTION_RECONCILIATION.dsl
 ```
 
+## About VB-OS
+
+[VB-OS](https://vbos.cloud) is a verification-as-a-service platform that
+provides deterministic, auditable governance for regulated workflows. Built by
+[MNC Labs, Inc.](https://mnclabs.com), VB-OS evaluates evidence against
+boundary definitions using an integer-only Rust binary, producing sealed
+evaluation records with full provenance and replay determinism.
+
+The platform supports any domain where decisions must be verifiable after the
+fact: financial trading, healthcare credentialing, supply chain compliance,
+and autonomous agent governance.
+
+- **Console:** [vbos.cloud](https://vbos.cloud)
+- **API:** [api.vb-os.org](https://api.vb-os.org)
+- **Documentation:** [vb-os.org](https://vb-os.org)
+- **GitHub:** [github.com/VB-OS](https://github.com/VB-OS)
+
 ## License
 
-Copyright 2026 MNC Labs, Inc. Licensed under the Apache License, Version 2.0.
-See [LICENSE](LICENSE) for the full text.
+Copyright 2026 MNC Labs, Inc. All rights reserved.
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for
+the full text.

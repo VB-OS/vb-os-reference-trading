@@ -1,5 +1,11 @@
 # VB-OS Trading Reference Integration -- Setup Guide
 
+**Author:** [Asaad Riaz](https://github.com/anriaz) -- Founder, MNC Labs, Inc.
+**Repository:** [github.com/VB-OS/vb-os-reference-trading](https://github.com/VB-OS/vb-os-reference-trading)
+**Platform:** [VB-OS Cloud](https://vbos.cloud)
+
+---
+
 Complete setup and execution guide for the governed financial trading pipeline.
 Covers order admissibility (B1), compliance authorization (B2), execution
 authorization (B3), and execution reconciliation (B4) -- all four boundaries

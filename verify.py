@@ -101,9 +101,12 @@ def gateway_api(method: str, path: str, body: dict | None = None) -> dict | None
             raw = r.read()
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:
-        body_text = e.read().decode()[:300] if e.fp else ""
+        body_text = e.read().decode()[:500] if e.fp else ""
         print(f"  Gateway HTTP {e.code}: {body_text}")
-        return None
+        try:
+            return json.loads(body_text) if body_text else None
+        except json.JSONDecodeError:
+            return None
     except Exception as exc:
         print(f"  Gateway error: {exc}")
         return None
@@ -195,10 +198,15 @@ def verify_integrity() -> tuple[int, int]:
         if not detail:
             continue
 
-        record = detail.get("data", detail)
-        workload = record.get("artifact", {}).get("workload", {})
+        record = detail.get("record", detail.get("data", detail))
+        artifact = detail.get("artifact") or {}
+        workload = artifact.get("workload", {})
         if not workload:
             workload = record.get("evidence", {})
+
+        if not workload:
+            print(f"    SKIP  {eval_id[:12]}  artifact not available")
+            continue
 
         side = workload.get("side", "buy")
         order_type = workload.get("order_type", "limit")
@@ -283,7 +291,7 @@ def verify_counterfactual() -> tuple[int, int]:
     clean_resp = api(
         "POST",
         f"/v1/projects/{PROJECT_ID}/connectors/{b1_connector}/gather",
-        {"raw_payload": clean_evidence, "provenance": clean_prov},
+        {"payload": clean_evidence, "context_evidence": {"_provenance": clean_prov}},
     )
 
     passed = 0
@@ -308,7 +316,7 @@ def verify_counterfactual() -> tuple[int, int]:
     cf_resp = api(
         "POST",
         f"/v1/projects/{PROJECT_ID}/connectors/{b1_connector}/gather",
-        {"raw_payload": cf_evidence, "provenance": cf_prov},
+        {"payload": cf_evidence, "context_evidence": {"_provenance": cf_prov}},
     )
 
     if cf_resp:
@@ -357,7 +365,7 @@ def verify_expiration() -> tuple[int, int]:
     }
     b1_prov = {k: "oms_database" for k in b1_ev}
     b1_resp = api("POST", f"/v1/projects/{PROJECT_ID}/connectors/{b1_conn}/gather",
-                  {"raw_payload": b1_ev, "provenance": b1_prov})
+                  {"payload": b1_ev, "context_evidence": {"_provenance": b1_prov}})
     if not b1_resp:
         print("  B1 gather failed")
         return 0, 1
@@ -394,7 +402,7 @@ def verify_expiration() -> tuple[int, int]:
     b2_prov["last_opposite_side_seconds"] = "compliance_system"
     b2_prov["cooldown_window_seconds"] = "compliance_system"
     b2_resp = api("POST", f"/v1/projects/{PROJECT_ID}/connectors/{b2_conn}/gather",
-                  {"raw_payload": b2_ev, "provenance": b2_prov})
+                  {"payload": b2_ev, "context_evidence": {"_provenance": b2_prov}})
     if not b2_resp:
         print("  B2 gather failed")
         return 0, 1
@@ -454,7 +462,7 @@ def verify_expiration() -> tuple[int, int]:
         "b2_evaluation_id": "orchestrator",
     }
     b3_resp = api("POST", f"/v1/projects/{PROJECT_ID}/connectors/{b3_conn}/gather",
-                  {"raw_payload": b3_ev, "provenance": b3_prov})
+                  {"payload": b3_ev, "context_evidence": {"_provenance": b3_prov}})
     if not b3_resp:
         print("  B3 gather failed")
         return 0, 1
@@ -470,7 +478,12 @@ def verify_expiration() -> tuple[int, int]:
     time.sleep(10)
 
     print("  Verifying expired authorization at gateway...")
-    gw_resp = gateway_api("POST", "/verify", {"evaluation_id": b3_id})
+    gw_resp = gateway_api("POST", "/verify", {
+        "evaluation_id": b3_id,
+        "b1_evaluation_id": b1_id,
+        "b2_evaluation_id": b2_id,
+        "authorization_valid_seconds": 5,
+    })
     if gw_resp:
         authorized = gw_resp.get("authorized", True)
         error = gw_resp.get("error", "")

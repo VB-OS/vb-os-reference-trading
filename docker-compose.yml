@@ -1,4 +1,5 @@
 # Copyright 2026 MNC Labs, Inc. Licensed under Apache 2.0.
+# Author: Asaad Riaz
 
 services:
   trading-postgres:
@@ -12,6 +13,8 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./seed.sql:/docker-entrypoint-initdb.d/01-seed.sql:ro
+    ports:
+      - "5432:5432"
     networks:
       - trading-net
     healthcheck:
@@ -30,6 +33,8 @@ services:
       DATABASE_URL: postgresql://trading:trading@trading-postgres:5432/trading
       GATEWAY_DB_PATH: /data/gateway.db
       GATEWAY_PORT: "9093"
+    ports:
+      - "9093:9093"
     volumes:
       - gateway-data:/data
     networks:

@@ -195,6 +195,77 @@ def load_proposal(order_ref: str) -> dict | None:
 
 # -- Evidence derivation ----------------------------------------------------
 
+B1_PROVENANCE = {
+    "order_ref": "oms_database",
+    "account_id": "oms_database",
+    "instrument_id": "oms_database",
+    "account_status": "oms_database",
+    "side": "oms_database",
+    "asset_class": "oms_database",
+    "quantity": "oms_database",
+    "order_notional_cents": "oms_database",
+    "buying_power_cents": "oms_database",
+    "order_type": "oms_database",
+    "market_session_open": "oms_database",
+}
+
+B2_PROVENANCE = {
+    "order_ref": "oms_database",
+    "account_id": "oms_database",
+    "instrument_id": "oms_database",
+    "side": "oms_database",
+    "quantity": "oms_database",
+    "asset_class": "oms_database",
+    "order_notional_cents": "oms_database",
+    "order_type": "oms_database",
+    "mandate_match": "compliance_system",
+    "concentration_bps_after": "risk_system",
+    "concentration_limit_bps": "risk_system",
+    "projected_position_quantity": "risk_system",
+    "position_limit_quantity": "risk_system",
+    "last_opposite_side_seconds": "compliance_system",
+    "cooldown_window_seconds": "compliance_system",
+}
+
+B3_PROVENANCE = {
+    "account_id": "oms_database",
+    "instrument_id": "oms_database",
+    "asset_class": "oms_database",
+    "side": "oms_database",
+    "quantity": "oms_database",
+    "quantity_unit": "oms_database",
+    "order_type": "oms_database",
+    "order_ref": "oms_database",
+    "order_notional_cents": "oms_database",
+    "trader_authority_cents": "risk_system",
+    "desk_exposure_cents": "risk_system",
+    "desk_limit_cents": "risk_system",
+    "combined_desk_and_order_cents": "oms_database",
+    "limit_price_cents": "oms_database",
+    "reference_price_cents": "market_data",
+    "price_tolerance_bps": "risk_system",
+    "price_deviation_above_scaled": "oms_database",
+    "price_deviation_below_scaled": "oms_database",
+    "tolerance_threshold_scaled": "oms_database",
+    "margin_requirement_cents": "risk_system",
+    "available_margin_cents": "risk_system",
+    "authorization_valid_seconds": "risk_system",
+    "b1_evaluation_id": "orchestrator",
+    "b2_evaluation_id": "orchestrator",
+}
+
+B4_PROVENANCE = {
+    "venue_authorization_reference": "venue_alpaca",
+    "expected_authorization_reference": "sealed_evaluation",
+    "execution_status": "venue_alpaca",
+    "executed_quantity": "venue_alpaca",
+    "authorized_quantity": "sealed_evaluation",
+    "previous_executed_quantity": "gateway_state",
+    "executed_avg_price_cents": "venue_alpaca",
+    "authorized_price_ceiling_cents": "sealed_evaluation",
+}
+
+
 def derive_notional(side: str, order_type: str, quantity: int,
                     price_cents: int, quantity_divisor: int) -> int:
     if order_type == "limit" and side == "buy":
@@ -299,14 +370,18 @@ def build_b3_evidence(p: dict, b1_eval_id: str, b2_eval_id: str) -> dict:
 
 # -- SDK gather wrapper -----------------------------------------------------
 
-def gather(client: VBOSClient, connector_name: str, payload: dict) -> dict | None:
+def gather(client: VBOSClient, connector_name: str, payload: dict,
+           provenance: dict | None = None) -> dict | None:
     connector_id = _resolve_connector(client, connector_name)
+    kwargs: dict = {
+        "project_id": PROJECT_ID,
+        "connector_id": connector_id,
+        "payload": payload,
+    }
+    if provenance:
+        kwargs["context_evidence"] = {"_provenance": provenance}
     try:
-        response = client.connectors.gather(
-            project_id=PROJECT_ID,
-            connector_id=connector_id,
-            payload=payload,
-        )
+        response = client.connectors.gather(**kwargs)
         return response
     except Exception as exc:
         print(f"  VB-OS Cloud error: {exc}")
@@ -328,7 +403,7 @@ def run_pipeline(client: VBOSClient, p: dict, live: bool = False) -> dict:
     # -- B1: Order Admissibility --
     print("  Stage B1 -- Order Admissibility")
     b1_ev = build_b1_evidence(p)
-    b1_resp = gather(client, "trading-b1-evidence", b1_ev)
+    b1_resp = gather(client, "trading-b1-evidence", b1_ev, B1_PROVENANCE)
     if not b1_resp:
         result["stopped_at"] = "B1"
         return result
@@ -353,7 +428,7 @@ def run_pipeline(client: VBOSClient, p: dict, live: bool = False) -> dict:
     # -- B2: Compliance Authorization --
     print("\n  Stage B2 -- Compliance Authorization")
     b2_ev = build_b2_evidence(p)
-    b2_resp = gather(client, "trading-b2-evidence", b2_ev)
+    b2_resp = gather(client, "trading-b2-evidence", b2_ev, B2_PROVENANCE)
     if not b2_resp:
         result["stopped_at"] = "B2"
         return result
@@ -378,7 +453,7 @@ def run_pipeline(client: VBOSClient, p: dict, live: bool = False) -> dict:
     # -- B3: Execution Authorization --
     print("\n  Stage B3 -- Execution Authorization")
     b3_ev = build_b3_evidence(p, b1_eval_id, b2_eval_id)
-    b3_resp = gather(client, "trading-b3-evidence", b3_ev)
+    b3_resp = gather(client, "trading-b3-evidence", b3_ev, B3_PROVENANCE)
     if not b3_resp:
         result["stopped_at"] = "B3"
         return result
@@ -420,6 +495,8 @@ def run_pipeline(client: VBOSClient, p: dict, live: bool = False) -> dict:
         "evaluation_id": b3_eval_id,
         "proposed_order": proposed,
         "live": live,
+        "b1_evaluation_id": b1_eval_id,
+        "b2_evaluation_id": b2_eval_id,
     }
     gw_resp = gateway_api("POST", "/submit", gw_body)
     result["gateway"] = gw_resp
@@ -554,6 +631,8 @@ def run_f_scenario(key: str, p: dict, client: VBOSClient, live: bool = False) ->
         print("  Submitting expired authorization to gateway...")
         gw_resp = gateway_api("POST", "/verify", {
             "evaluation_id": result["b3"]["evaluation_id"],
+            "b1_evaluation_id": result["b1"]["evaluation_id"],
+            "b2_evaluation_id": result["b2"]["evaluation_id"],
         })
         print(f"    Gateway response: {json.dumps(gw_resp, indent=2)}")
         result["gateway"] = gw_resp
@@ -574,6 +653,8 @@ def run_f_scenario(key: str, p: dict, client: VBOSClient, live: bool = False) ->
                                "quantity": p["quantity"], "order_type": p["order_type"],
                                "order_ref": p["order_ref"]},
             "live": False,
+            "b1_evaluation_id": result["b1"]["evaluation_id"],
+            "b2_evaluation_id": result["b2"]["evaluation_id"],
         })
         print(f"    Duplicate dispatch result: {gw_resp}")
         return result
@@ -595,6 +676,8 @@ def run_f_scenario(key: str, p: dict, client: VBOSClient, live: bool = False) ->
                 "order_type": p["order_type"], "order_ref": p["order_ref"],
             },
             "live": False,
+            "b1_evaluation_id": result["b1"]["evaluation_id"],
+            "b2_evaluation_id": result["b2"]["evaluation_id"],
         })
         print(f"    Gateway rejection: {gw_resp}")
         result["gateway"] = gw_resp
@@ -608,7 +691,7 @@ def run_f_scenario(key: str, p: dict, client: VBOSClient, live: bool = False) ->
         # Forged B2 lineage: run B1 + B2 with different accounts, then splice into B3
         print("  Running B1 for real order (ACC-ALPHA-1)...")
         b1_ev = build_b1_evidence(p)
-        b1_resp = gather(client, "trading-b1-evidence", b1_ev)
+        b1_resp = gather(client, "trading-b1-evidence", b1_ev, B1_PROVENANCE)
         b1_eval = (b1_resp or {}).get("evaluation", {})
         show_evaluation(b1_eval, "B1")
         b1_eval_id = b1_eval.get("evaluation_id", "")
@@ -619,14 +702,14 @@ def run_f_scenario(key: str, p: dict, client: VBOSClient, live: bool = False) ->
             print("  ERROR: ORD-F8-B2 not found")
             return {"stopped_at": "F8-setup"}
         b2_ev = build_b2_evidence(p_fake)
-        b2_resp = gather(client, "trading-b2-evidence", b2_ev)
+        b2_resp = gather(client, "trading-b2-evidence", b2_ev, B2_PROVENANCE)
         b2_eval = (b2_resp or {}).get("evaluation", {})
         show_evaluation(b2_eval, "B2-forged")
         b2_eval_id = b2_eval.get("evaluation_id", "")
 
         print("\n  Running B3 with forged B2 evaluation_id (cross-chain mismatch expected)...")
         b3_ev = build_b3_evidence(p, b1_eval_id, b2_eval_id)
-        b3_resp = gather(client, "trading-b3-evidence", b3_ev)
+        b3_resp = gather(client, "trading-b3-evidence", b3_ev, B3_PROVENANCE)
         b3_eval = (b3_resp or {}).get("evaluation", {})
         show_evaluation(b3_eval, "B3")
 
@@ -643,6 +726,8 @@ def run_f_scenario(key: str, p: dict, client: VBOSClient, live: bool = False) ->
                     "order_type": p["order_type"],
                     "order_ref": p["order_ref"],
                 },
+                "b1_evaluation_id": b1_eval_id,
+                "b2_evaluation_id": b2_eval_id,
             })
             print(f"    Gateway verification: {gw_resp}")
 
@@ -683,6 +768,8 @@ def run_f_scenario(key: str, p: dict, client: VBOSClient, live: bool = False) ->
                 "order_ref": p["order_ref"],
             },
             "live": False,
+            "b1_evaluation_id": result["b1"]["evaluation_id"],
+            "b2_evaluation_id": result["b2"]["evaluation_id"],
         })
         print(f"    Second dispatch result: {gw_resp}")
         return result
@@ -691,13 +778,13 @@ def run_f_scenario(key: str, p: dict, client: VBOSClient, live: bool = False) ->
         # Cross-chain order type mismatch: B1 with market, B3 with limit
         print("  Running B1 with market order type...")
         b1_ev = build_b1_evidence(p)
-        b1_resp = gather(client, "trading-b1-evidence", b1_ev)
+        b1_resp = gather(client, "trading-b1-evidence", b1_ev, B1_PROVENANCE)
         b1_eval = (b1_resp or {}).get("evaluation", {})
         show_evaluation(b1_eval, "B1-market")
 
         print("\n  Running B2 with market order type...")
         b2_ev = build_b2_evidence(p)
-        b2_resp = gather(client, "trading-b2-evidence", b2_ev)
+        b2_resp = gather(client, "trading-b2-evidence", b2_ev, B2_PROVENANCE)
         b2_eval = (b2_resp or {}).get("evaluation", {})
         show_evaluation(b2_eval, "B2-market")
 
@@ -711,7 +798,7 @@ def run_f_scenario(key: str, p: dict, client: VBOSClient, live: bool = False) ->
 
         print("\n  Running B3 with LIMIT order type (mismatch with B1/B2 market)...")
         b3_ev = build_b3_evidence(p_limit, b1_eval_id, b2_eval_id)
-        b3_resp = gather(client, "trading-b3-evidence", b3_ev)
+        b3_resp = gather(client, "trading-b3-evidence", b3_ev, B3_PROVENANCE)
         b3_eval = (b3_resp or {}).get("evaluation", {})
         show_evaluation(b3_eval, "B3-limit")
 
@@ -719,6 +806,8 @@ def run_f_scenario(key: str, p: dict, client: VBOSClient, live: bool = False) ->
             print("\n  Gateway cross-chain verification catches order_type mismatch...")
             gw_resp = gateway_api("POST", "/verify", {
                 "evaluation_id": b3_eval.get("evaluation_id"),
+                "b1_evaluation_id": b1_eval_id,
+                "b2_evaluation_id": b2_eval_id,
             })
             print(f"    Gateway: {gw_resp}")
 
@@ -775,7 +864,7 @@ def run_simulated_b4(key: str, p: dict, result: dict, client: VBOSClient) -> Non
     else:
         return
 
-    b4_resp = gather(client, "trading-b4-evidence", b4_evidence)
+    b4_resp = gather(client, "trading-b4-evidence", b4_evidence, B4_PROVENANCE)
     if b4_resp:
         b4_eval = b4_resp.get("evaluation") or {}
         show_evaluation(b4_eval, "B4")
@@ -821,7 +910,7 @@ def run_full_pipeline(live: bool = False) -> int:
     print(f"{'=' * 72}\n")
 
     b1_ev = build_b1_evidence(p)
-    b1_resp = gather(client, "trading-b1-evidence", b1_ev)
+    b1_resp = gather(client, "trading-b1-evidence", b1_ev, B1_PROVENANCE)
     if not b1_resp:
         print("\n  B1 submission failed -- pipeline halted.")
         return 1
@@ -842,7 +931,7 @@ def run_full_pipeline(live: bool = False) -> int:
     print(f"{'=' * 72}\n")
 
     b2_ev = build_b2_evidence(p)
-    b2_resp = gather(client, "trading-b2-evidence", b2_ev)
+    b2_resp = gather(client, "trading-b2-evidence", b2_ev, B2_PROVENANCE)
     if not b2_resp:
         print("\n  B2 submission failed -- pipeline halted.")
         return 1
@@ -863,7 +952,7 @@ def run_full_pipeline(live: bool = False) -> int:
     print(f"{'=' * 72}\n")
 
     b3_ev = build_b3_evidence(p, b1_eval_id, b2_eval_id)
-    b3_resp = gather(client, "trading-b3-evidence", b3_ev)
+    b3_resp = gather(client, "trading-b3-evidence", b3_ev, B3_PROVENANCE)
     if not b3_resp:
         print("\n  B3 submission failed -- pipeline halted.")
         return 1
@@ -901,6 +990,8 @@ def run_full_pipeline(live: bool = False) -> int:
         "evaluation_id": b3_eval_id,
         "proposed_order": proposed,
         "live": live,
+        "b1_evaluation_id": b1_eval_id,
+        "b2_evaluation_id": b2_eval_id,
     })
     if gw_resp:
         print(f"    Gateway status: {gw_resp.get('status')}")
@@ -927,7 +1018,7 @@ def run_full_pipeline(live: bool = False) -> int:
         "executed_avg_price_cents": p["limit_price_cents"],
         "authorized_price_ceiling_cents": p["limit_price_cents"],
     }
-    b4_resp = gather(client, "trading-b4-evidence", b4_evidence)
+    b4_resp = gather(client, "trading-b4-evidence", b4_evidence, B4_PROVENANCE)
     if b4_resp:
         b4_eval = b4_resp.get("evaluation") or {}
         show_evaluation(b4_eval, "B4")
